@@ -5,10 +5,11 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import Qt
 
 from common import util
-from common import settings
+from common import settings, xdg
 
-from qutepart import EverydayPart
+from gui.main.everydaypart import EverydayPart
 # from gui.main.everydayeditor import EverydayEditor
+from gui.main.everydayeditor import BasicEverydayEditor
 
 from data import FileWrapper
 
@@ -49,13 +50,28 @@ class BackupViewer(QtWidgets.QWidget):
 		button.clicked.connect(self.deleteAll)
 		l3.addWidget(button)
 		
+		button = QtWidgets.QPushButton(_('Compare to current'))
+		button.clicked.connect(self.compareToCurrent)
+		l3.addWidget(button)
+		
 		
 		
 		
 		self.backupListWidget = BackupList(self)
 		
+		editorSectionWidget = QtWidgets.QWidget()
+		editorSectionLayout = QtWidgets.QVBoxLayout()
+		editorSectionWidget.setLayout(editorSectionLayout)
 		
-		self.editor = EverydayPart()
+		
+		
+		# self.editor = EverydayPart()
+		self.editor = BasicEverydayEditor(self)
+		editorSectionLayout.addWidget(self.editor, 1)
+		# self.searchInput = QtWidgets.QLineEdit()
+		# self.searchInput.setPlaceholderText('Find - Ctrl + F')
+		# self.searchInput.returnPressed.connect(self.editor.search)
+		# editorSectionLayout.addWidget(self.searchInput)
 		
 		w = QtWidgets.QWidget()
 		l = QtWidgets.QVBoxLayout()
@@ -68,7 +84,16 @@ class BackupViewer(QtWidgets.QWidget):
 		
 		self.filterInput = QtWidgets.QLineEdit()
 		self.filterInput.setPlaceholderText(_('Search (press F2 to focus)'))
-		self.filterInput.textChanged.connect(self.filter)
+		# self.filterInput.textChanged.connect(self.filter)
+		
+		
+		self.searchKeyDebounce = QtCore.QTimer()
+		self.searchKeyDebounce.setInterval(350)
+		self.searchKeyDebounce.setSingleShot(True)
+		self.searchKeyDebounce.timeout.connect(self.filter)
+			
+		self.filterInput.textChanged.connect(self.searchKeyDebounce.start)
+		
 		
 		l2.addWidget(QtWidgets.QLabel(_('Filter') + ' :'), 0)
 		l2.addWidget(self.filterInput, 1)
@@ -79,13 +104,54 @@ class BackupViewer(QtWidgets.QWidget):
 		
 		
 		splitter.addWidget(w)
-		splitter.addWidget(self.editor)
+		splitter.addWidget(editorSectionWidget)
 		
 		
 		
 		self.setLayout(self.layout)
 		
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+F", "Edit|Find")), self, self.editor.focusForSearch)
 		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("F2", "Edit|Search")), self, self.focusForSearch)
+	
+	def compareToCurrent(self):
+		indexes = self.backupListWidget.selectedIndexes()
+			
+		
+		
+		for i in indexes:
+			try:
+				i = self.backupListWidget.filterModel.mapToSource(i)
+			except:
+				pass
+			# print(self.backupListWidget.getTrackAt(i)['path'])
+			elt = self.backupListWidget.getTrackAt(i)
+			path = elt['path'] # This is orig file path
+			
+			content = self.mainFrame.DB.getRevisionContent(elt['ID'])
+			
+			dirPath = xdg.get_data_home()
+		
+			ID = '1'
+			path_2 = os.path.join(dirPath, 'tmp_compare' + ID +'.txt')
+			f = open(path_2, 'w')
+			f.write(content)
+			f.close()
+			
+			
+			import subprocess
+			
+			command = settings.get_option('compare_tool/compare_program_path', 'meld')
+			commandMask = settings.get_option('compare_tool/command_mask', '{program} {file1} {file2}')
+			commandMask = commandMask.replace(' ', '@')
+			commandMask = commandMask.replace('{program}', command)
+			commandMask = commandMask.replace('{file1}', path)
+			commandMask = commandMask.replace('{file2}', path_2)
+			
+			subprocess.Popen(commandMask.split('@'))
+			
+			break
+		
+
 		
 	
 	def deleteSelected(self):
@@ -122,12 +188,30 @@ class BackupViewer(QtWidgets.QWidget):
 			
 			self.filterInput.setFocus()
 			self.filterInput.selectAll()
+			
+	def focusForSearchEditor(self):
+		print('focusForSearch');
+		self.editor.initialSearchPos = None # so that it will takes cursor current position
+		self.searchInput.setFocus()
+		selection = self.editor.selectedText
+		
+		line, column = self.editor.cursorPosition 
+		self.editor.cursorPosition = line, (column - len(selection))
+
+		if selection != '':
+			text = selection
+			self.searchInput.setText(text)
+		self.searchInput.selectAll()
 	
 	
-	def filter(self, text):
+	def filter(self, text=None):
 		'''
 			Hides visibleQueue tracks that does not match text
 		'''
+		
+		if(text==None):
+			text = self.filterInput.text()
+		
 		if(text == ''):
 			self.backupListWidget.filterModel = None
 			self.backupListWidget.setModel(self.backupListWidget.model)
@@ -140,12 +224,20 @@ class BackupViewer(QtWidgets.QWidget):
 			self.backupListWidget.setModel(filterModel)
 		
 	def reload(self, params={}):
-		revisions = self.mainFrame.DB.getAllRevisions()
+		
+		pathFilter = []
+		if('path' in params):
+			self.locked_on_path = params['path']
+			# self.filterInput.setText(params['path'])
+			pathFilter.append(self.locked_on_path)
+			
+		
+		revisions = self.mainFrame.DB.getAllRevisions(pathFilter)
 		
 		self.backupListWidget.loadRevisions(revisions)
 		
-		if('path' in params):
-			self.filterInput.setText(params['path'])
+		
+			
 			
 		
 	def returnToMainView(self):
@@ -171,6 +263,7 @@ class BackupList(QtWidgets.QTableView):
 		header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
 		header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
 		header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+		header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
 		
 		#self.model.append([{'path':'test', 'birth_date':'20222', 'unsaved':1}])
 		
@@ -200,7 +293,9 @@ class BackupList(QtWidgets.QTableView):
 			lines = content.split('\n')
 		else:
 			lines = []
-		self.parent.editor.lines = lines
+		self.parent.editor.editor.lines = lines
+		self.parent.editor.editor.detectSyntax(sourceFilePath=elt['path'])
+		# detectSyntax(self.parent.editor.editor, el['path'])
 		pass
 	
 	def loadRevisions(self, revisions):
@@ -215,7 +310,7 @@ class BackupListModel(QtCore.QAbstractTableModel):
 		QtCore.QAbstractTableModel.__init__(self, parent, *args)
 		self.tracks = []
 		
-		self.types = {1:'Sequential', 2:'Day', 3:'Hour'}
+		self.types = {1:'Sequential', 2:'Day', 3:'Hour', 10:'Snapshot'}
 	
 	def append(self, data, duringInit=False):
 		self.insert(data, len(self.tracks), duringInit)
@@ -255,13 +350,17 @@ class BackupListModel(QtCore.QAbstractTableModel):
 				return _('Unsaved')
 			elif section == 3:
 				return _('Type')
+			elif section == 4:
+				return _('Version')
+			elif section == 5:
+				return _('Comment')
 		
 		
 	def rowCount(self, parent):
 		return len(self.tracks)
 
 	def columnCount(self, parent):
-		return 4
+		return 6
 		return len(self.tracks[0])
 		
 	def reset(self):
@@ -282,4 +381,12 @@ class BackupListModel(QtCore.QAbstractTableModel):
 				return self.tracks[index.row()]['unsaved'] == 1
 			elif index.column() == 3:
 				return self.types[ self.tracks[index.row()]['Type_ID'] ]
+			elif index.column() == 4:
+				val = self.tracks[index.row()]['file_version']
+				if val is None: return 'standard'
+				else: return val
+			elif index.column() == 5:
+				val = self.tracks[index.row()]['comment']
+				if val is None: return ''
+				else: return val
 	

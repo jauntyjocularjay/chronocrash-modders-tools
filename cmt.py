@@ -9,6 +9,8 @@ now = datetime.now()
 import logging
 
 
+from pyqttoast import Toast, ToastPreset, ToastPosition
+
 
 # print log in example.log instead of the console, and set the log level to DEBUG (by default, it is set to WARNING)
 
@@ -21,13 +23,14 @@ except:
 	pass
 if(os.path.isfile(logFile)): shutil.copyfile(logFile, logFile + '.1')
 #logFile = 'journal2.log'
-logging.basicConfig(filename=logFile, filemode='w', level=logging.DEBUG)
+# logging.basicConfig(filename=logFile, filemode='w', level=logging.DEBUG)
 
 
 
 logger = logging.getLogger()
 logger.debug(now)
 logger.debug(logFile)
+logger.setLevel(logging.INFO)
 #print(logging.getLoggerClass().root.handlers[0].baseFilename)
 #sys.stderr.write = logger.error
 #sys.stdout.write = logger.info
@@ -45,12 +48,17 @@ from random import uniform
 
 from common import settings, util
 
+
+settings.DISABLE_STYLE_SHEET = False
+
+
 import gettext
 trans = gettext.NullTranslations()
 trans.install()
 
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 
 #from dialogeditor import DialogEditor
 
@@ -68,8 +76,33 @@ import style
 
 TITLE = 'OpenBOR Utils & Tools'
 TITLE = 'ChronoCrash Modders Tools'
+# TITLE = 'cmt.py'
+# TITLE = 'CMT'
 import fallbackicons
 
+
+class FocusSwitcher(QtWidgets.QLabel):
+	
+	def __init__(self, parent, text):
+		self.parent = parent
+		QtWidgets.QLabel.__init__(self, text)
+		self.lastSwitch = 0
+		
+	def mousePressEvent(self, e):
+		self.toggle()
+		
+	def enterEvent(self, e):
+		if settings.get_option('gui/toggle_focus_mode_hover', False):
+			t = time.time()
+			# t = datetime.now().timestamp()
+			if(t >= self.lastSwitch+1):
+				self.toggle()
+				self.lastSwitch = t
+			
+	def toggle(self):
+		
+		self.parent.switchFocus()
+		
 
 
 class Frame(QtWidgets.QMainWindow):
@@ -106,8 +139,7 @@ class Frame(QtWidgets.QMainWindow):
 		else:
 			self.maximized = False
 		
-		menuBar = MenuBar(self)
-		self.setMenuBar(menuBar)
+		
 		
 
 		#menuBar.setNativeMenuBar(False)
@@ -120,6 +152,10 @@ class Frame(QtWidgets.QMainWindow):
 		#ssWidget = SpriteSorterWidget()
 		
 		self.meWidget = MainEditorWidget(self)
+		
+		menuBar = MenuBar(self)
+		self.setMenuBar(menuBar)
+		
 		self.meWidget.menuBar = menuBar
 		#leWidget = LevelEditorWidget()
 		
@@ -143,8 +179,13 @@ class Frame(QtWidgets.QMainWindow):
 		
 		
 		from data.db import DB
-		self.DB = DB('backups.db')
+		if settings.ALPHA:
+			self.DB = DB('backups-alpha.db')
+		else:
+			self.DB = DB('backups.db')
 		File.DB = self.DB
+		
+		settings.DB = self.DB
 		
 		
 		from dialogeditor import DialogEditor
@@ -172,8 +213,8 @@ class Frame(QtWidgets.QMainWindow):
 		self.mainWidget = self.meWidget
 		
 		
-		self.setTheme(settings.get_option('gui/widgets_theme', None))
-		self.setEditorTheme(settings.get_option('gui/editor_theme', None))
+		self.setTheme(settings.get_option('gui/widgets_theme', 'Normal'))
+		self.setEditorTheme(settings.get_option('gui/editor_theme', 'Normal'))
 		
 		
 		self.autosaveTimer = QtCore.QTimer()
@@ -187,11 +228,52 @@ class Frame(QtWidgets.QMainWindow):
 		#self.createTrayIcon()
 		#self.trayIcon.show()
 		#self.trayIcon.activated.connect(self.trayIconClick)
+		self.focused = False
+		self.focusSwitcher = FocusSwitcher(self, 'FOCUS')
+		self.window().statusBar().addWidget(self.focusSwitcher, 1)
+		self.window().statusBar().addWidget(QtWidgets.QLabel(''), 6)
+	
+	
+	def switchFocus(self):
+		self.focused = not self.focused
 		
+		if(self.focused):
+			self.focusSwitcher.setText('UNFOCUS')
+			theme = settings.get_option('gui/widgets_theme', None)
+			if(theme != None and 'dark' in theme.lower()):
+				self.focusSwitcher.setStyleSheet("background-color: green") 
+			else:
+				self.focusSwitcher.setStyleSheet("background-color: lightgreen") 
+			self.meWidget.entityEditor.animSelector.hide()
+			self.meWidget.entityEditor.frameViewer.hide()
+			self.meWidget.headerWidget.hide()
+			self.meWidget.leftSidePanel.hide()
+			# self.meWidget.menuBar.hide()
+			self.meWidget.entityEditor.searchEntry.hide()
+			self.meWidget.entityEditor.replaceEntry.hide()
+			
+			self.meWidget.editor.contentIndexerPanel.hide()
+		else:
+			self.focusSwitcher.setText('Focus')
+			self.focusSwitcher.setStyleSheet("") 
+			self.meWidget.entityEditor.animSelector.show()
+			self.meWidget.entityEditor.frameViewer.show()
+			self.meWidget.headerWidget.show()
+			self.meWidget.leftSidePanel.show()
+			self.meWidget.menuBar.show()
+			
+			self.meWidget.entityEditor.searchEntry.show()
+			self.meWidget.entityEditor.replaceEntry.show()
+			
+			self.meWidget.editor.contentIndexerPanel.show()
 		
 	def autoSave(self):
 		if hasattr(self.mainWidget, "fileSelector"):
-			self.mainWidget.backupUnsaved();
+			self.mainWidget.backupUnsaved()
+			self.mainWidget.fileSelector.saveSession()
+			
+		# settings.MANAGER.save() # don't think it's needed
+		
 		
 		
 	def createTrayIcon(self):
@@ -271,12 +353,41 @@ class Frame(QtWidgets.QMainWindow):
 		#self.textEditor.clear()
 		self.mainWidget.editNew()
 		
+		
+	def notify(self, text, type='info', title=None):
+		toast = Toast(self)
+		toast.setDuration(5000)  # Hide after 5 seconds
+		
+		
+		# Init font
+		font = QtGui.QFont('Courier', 10)
+		font2 = QtGui.QFont('Courier', 10, QtGui.QFont.Weight.Bold)
+
+		# Set fonts
+		toast.setTitleFont(font2)  # Default: QFont('Arial', 9, QFont.Weight.Bold)
+		toast.setTextFont(font)   # Default: QFont('Arial', 9)
+		
+		toast.setText(text)
+		toast.setPosition(ToastPosition.TOP_RIGHT)
+		if(type == 'warning'):
+			if(title == None): title = 'Warning'
+			toast.applyPreset(ToastPreset.WARNING)
+		else:
+			if(title == None): title = 'Success'
+			toast.applyPreset(ToastPreset.SUCCESS)  # Apply style preset
+		toast.setTitle(title)
+		toast.show()
+		
 	def openFile(self):
 		self.mainWidget.openFile()
 		
 		
 	def quit(self, e=None):
 		logging.debug("MAIN FRAME QUIT EVENT " + str(e) )
+		if(QtWidgets.QMessageBox.question(self, _('Close'), _('Are you sure you want to close ?'), defaultButton=QtWidgets.QMessageBox.Yes) != QtWidgets.QMessageBox.Yes):
+			if e is not None:
+				e.ignore()
+			return
 		if not self.meWidget.close(True):
 			if e is not None:
 				e.ignore()
@@ -284,7 +395,7 @@ class Frame(QtWidgets.QMainWindow):
 		settings.set_option('gui/maximized', self.maximized)
 		settings.set_option('gui/window_x', self.pos().x())
 		settings.set_option('gui/window_y', self.pos().y())
-		settings.MANAGER.save()
+		settings.MANAGER.save_sync() # synchronous, and waits for any in-flight threaded save : guarantees the write completes before exit
 		#settings.MANAGER.saveTimer.cancel()
 		app.quit()
 			
@@ -316,11 +427,13 @@ class Frame(QtWidgets.QMainWindow):
 		
 	def setMode(self, mode, params={}):
 		self.mainWidget.hide()
+		self.mode = mode
 		if mode == 'dialog':
 			
 			
 			self.mainWidget = self.dialogWidget
 		elif mode == 'project':
+			self.projectSelector.reset()
 			self.mainWidget = self.projectSelector
 		elif mode == 'mainEditor':
 			self.mainWidget = self.meWidget
@@ -342,7 +455,8 @@ class Frame(QtWidgets.QMainWindow):
 		f = open(path)
 		content = f.read()
 		f.close()
-		app.setStyleSheet(style.STYLE_SHEET + content)
+		if not settings.DISABLE_STYLE_SHEET:
+			app.setStyleSheet(style.get_style_sheet() + content)
 		settings.set_option('gui/widgets_theme', name)
 		
 		
@@ -354,18 +468,19 @@ class Frame(QtWidgets.QMainWindow):
 		if name is None: return
 
 	
+		# Meant for "save session as" call (must be done before close which clears loadedFiles)
+		if(save): self.mainWidget.fileSelector.saveSession(name)
+
 		# Before changing, save current
 		if(savePrevious and not self.meWidget.close(True)): # False mean there was unsaved files and the user canceled operation
 			return
-		#if self.mainWidget.fileSelector.sessionName != None:
-			#self.mainWidget.fileSelector.saveSession()
-	
-
-		# Meant for "save session as" call
-		if(save): self.mainWidget.fileSelector.saveSession(name)
 
 		if(name != ''):
 			settings.set_option('general/last_session', name)
+			
+			if(self.mainWidget.currentProject != None):
+				self.mainWidget.currentProject['last_session'] = name
+				self.projectSelector.actualizeProject(self.mainWidget.currentProject)
 		self.mainWidget.fileSelector.loadSession(name)
 			
 	def tabChange(self, index):
@@ -386,9 +501,9 @@ def excepthook(exc_type, exc_value, exc_tb):
 	# or QtWidgets.QApplication.exit(0)
 	msg = QtWidgets.QMessageBox()
 	msg.setIcon(QtWidgets.QMessageBox.Warning)
-	msg.setText("AN ERROR HAS OCCURED")
+	msg.setText("AN ERROR HAS OCCURED " + settings.VERSION)
 	msg.setInformativeText('PLEASE COPY THE ERROR MESSAGE AND REPORT IT HERE : <a href="https://www.chronocrash.com/forum/threads/chronocrash-modders-tools.2467">https://www.chronocrash.com/forum/threads/chronocrash-modders-tools.2467/</a><pre>\n\nTHEN CLICK "OK", SAVE EVERYTHING YOU CAN AND RESTART THE SOFTWARE BEFORE CONTINUING USING IT\n\n(OR CONTINUE USING IT AT YOUR OWN RISKS)\n\n' + tb + '</pre>')
-	msg.setWindowTitle("CRASH REPORT")
+	msg.setWindowTitle("CRASH REPORT " + settings.VERSION)
 	msg.setDetailedText(tb)
 	msg.setStandardButtons(QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel)
 	#msg.buttonClicked.connect(msgbtn)
@@ -397,27 +512,81 @@ def excepthook(exc_type, exc_value, exc_tb):
 
 sys.excepthook = excepthook
 
-try:
-	app = QtWidgets.QApplication(sys.argv)
-	print(app.instance())
-	
-	memory = QtCore.QSharedMemory(app)
-	memory.setKey("CMT")
-	if memory.attach():
-		print('already running')
-	else:
-		print('NOT running')
-		memory.create(1)
-	
-	app.setApplicationName(TITLE)
-	app.setStyleSheet(style.STYLE_SHEET)
-	print (sys.argv)
-	frame = Frame()
-	frame.show()
+def run():
 
-	sys.exit(app.exec_())
+	global app
 
-except Exception:
-	print('CRASH')
-	logging.getLogger().exception('CRASH')
-	raise
+	try:
+		app = QtWidgets.QApplication(sys.argv)
+		print(app.instance())
+
+		server_name = "CMT_SingleInstance"
+
+		# Tenter de se connecter à une instance existante
+		socket = QLocalSocket()
+		socket.connectToServer(server_name)
+
+		if socket.waitForConnected(500):
+			# Instance existante trouvée : lui envoyer le fichier
+			print('already running, sending file to existing instance')
+			if len(sys.argv) > 1:
+				socket.write(sys.argv[1].encode('utf-8'))
+				socket.waitForBytesWritten()
+			sys.exit(0)
+
+		print('NOT running, starting new instance')
+
+		# Pas d'instance existante : créer le serveur
+		QLocalServer.removeServer(server_name)  # Nettoyer un socket orphelin
+		server = QLocalServer()
+		server.listen(server_name)
+
+		app.setApplicationName(TITLE)
+
+		# Courier was previously enforced by the stylesheet ; it is now the
+		# default app font, overridable in Settings -> Application -> Font
+		appFont = app.font()
+		appFont.setFamily(settings.get_option('gui/font_family', 'Courier'))
+		appFont.setPointSize(settings.get_option('gui/font_size', appFont.pointSize()))
+		app.setFont(appFont)
+
+		app.setStyleSheet(style.get_style_sheet())
+		print (sys.argv)
+		frame = Frame()
+
+		# Gérer les connexions entrantes
+		def handle_new_connection():
+			client = server.nextPendingConnection()
+			if client.waitForReadyRead(1000):
+				file_path = client.readAll().data().decode('utf-8')
+				if file_path:
+					frame.mainWidget.openFile(file_path)
+					# Forcer la fenêtre au premier plan sous Linux (seulement si pas déjà active)
+					if not frame.isActiveWindow():
+						frame.setWindowState(frame.windowState() & ~QtCore.Qt.WindowMinimized | QtCore.Qt.WindowActive)
+						frame.raise_()
+						frame.activateWindow()
+						# Astuce supplémentaire pour certains window managers
+						frame.setWindowFlags(frame.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+						frame.show()
+						frame.setWindowFlags(frame.windowFlags() & ~QtCore.Qt.WindowStaysOnTopHint)
+						frame.show()
+			client.deleteLater()
+
+		server.newConnection.connect(handle_new_connection)
+
+		# Ouvrir le fichier passé en argument au démarrage
+		if len(sys.argv) > 1:
+			frame.mainWidget.openFile(sys.argv[1])
+
+		frame.show()
+
+		sys.exit(app.exec_())
+
+	except Exception:
+		print('CRASH')
+		logging.getLogger().exception('CRASH')
+		raise
+
+
+run()

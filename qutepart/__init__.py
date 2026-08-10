@@ -2,40 +2,23 @@
 =========================================================
 """
 
-import threading
-from functools import wraps
-
-
-def threaded(f):
-	"""
-		A decorator that will make any function run in a new thread
-	"""
-	@wraps(f)
-	def wrapper(*args, **kwargs):
-		t = threading.Thread(target=f, args=args, kwargs=kwargs)
-		#t = multiprocessing.Process(target = func, args = args, kwargs = kwargs)
-		t.setDaemon(True)
-		t.start()
-		
-	return wrapper
-
 import sys
 import os.path
 import logging
 import platform
 
-from PyQt5 import QtGui
-
-from PyQt5.QtCore import QRect, Qt, pyqtSignal, QRegExp, QSignalBlocker, QEvent, QMimeData
-from PyQt5.QtWidgets import QAction, QApplication, QDialog, QPlainTextEdit, QTextEdit, QToolTip
+from PyQt5.QtCore import QRect, Qt, pyqtSignal
+from PyQt5.QtWidgets import QAction, QApplication, QDialog, QPlainTextEdit, QTextEdit, QWidget
 from PyQt5.QtPrintSupport import QPrintDialog
 from PyQt5.QtGui import QColor, QBrush, \
                         QFont, \
                         QIcon, QKeySequence, QPainter, QPen, QPalette, \
                         QTextCharFormat, QTextCursor, \
-                        QTextBlock, QTextFormat, QDropEvent
+                        QTextBlock, QTextFormat
 
 from qutepart.syntax import SyntaxManager
+import qutepart.version
+
 
 if 'sphinx-build' not in sys.argv[0]:
     # See explanation near `import sip` above
@@ -47,14 +30,12 @@ if 'sphinx-build' not in sys.argv[0]:
     import qutepart.sideareas
     from qutepart.indenter import Indenter
     import qutepart.vim
-    import qutepart.bookmarks
 
     def setPositionInBlock(cursor, positionInBlock, anchor=QTextCursor.MoveAnchor):
         return cursor.setPosition(cursor.block().position() + positionInBlock, anchor)
 
 
-
-VERSION = (2, 2, 3)
+VERSION = qutepart.version.VERSION
 
 
 logger = logging.getLogger('qutepart')
@@ -63,6 +44,7 @@ consoleHandler.setFormatter(logging.Formatter("qutepart: %(message)s"))
 logger.addHandler(consoleHandler)
 
 logger.setLevel(logging.ERROR)
+# logger.setLevel(logging.DEBUG)
 
 
 # After logging setup
@@ -72,8 +54,12 @@ binaryParserAvailable = qutepart.syntax.loader.binaryParserAvailable
 
 _ICONS_PATH = os.path.join(os.path.dirname(__file__), 'icons')
 
-def getIconPath(iconFileName):
-    return os.path.join(_ICONS_PATH, iconFileName)
+def getIcon(iconFileName):
+    icon = QIcon.fromTheme(iconFileName)
+    if icon.name() != iconFileName:
+        # Use bundled fallback icon
+        icon = QIcon(os.path.join(_ICONS_PATH, iconFileName))
+    return icon
 
 
 #Define for old Qt versions methods, which appeared in 4.7
@@ -84,7 +70,16 @@ if not hasattr(QTextCursor, 'positionInBlock'):
 
 
 
-	
+class EdgeLine(QWidget):
+    def __init__(self, editor):
+        QWidget.__init__(self, editor)
+        self.__editor = editor
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(event.rect(), self.__editor.lineLengthEdgeColor)
+
 
 class Qutepart(QPlainTextEdit):
     '''Qutepart is based on QPlainTextEdit, and you can use QPlainTextEdit methods,
@@ -145,13 +140,16 @@ class Qutepart(QPlainTextEdit):
     * ``absSelectedPosition`` - selection coordinates as ``(startPosition, cursorPosition)`` where position is offset from the beginning of text.
     Rectangular selection is not available via API currently.
 
-    **EOL, indentation, edge**
+    **EOL, indentation, edge, current line**
 
     * ``eol`` - End Of Line character. Supported values are ``\\n``, ``\\r``, ``\\r\\n``. See comments for ``textForSaving()``
     * ``indentWidth`` - Width of ``Tab`` character, and width of one indentation level. Default is ``4``.
     * ``indentUseTabs`` - If True, ``Tab`` character inserts ``\\t``, otherwise - spaces. Default is ``False``.
     * ``lineLengthEdge`` - If not ``None`` - maximal allowed line width (i.e. 80 chars). Longer lines are marked with red (see ``lineLengthEdgeColor``) line. Default is ``None``.
     * ``lineLengthEdgeColor`` - Color of line length edge line. Default is red.
+    * ``drawSolidEdge`` - Draw the edge as a solid vertical line. Default is ``False``.
+    * ``drawIndentations`` - Draw indentations. Default is ``True``.
+    * ``currentLineColor`` - Color of the current line background. If None then the current line is not highlighted. Default: #ffffa3
 
     **Visible white spaces**
 
@@ -237,12 +235,25 @@ class Qutepart(QPlainTextEdit):
     * ``vimModeEnabledChanged(enabled)            Vim mode has been enabled or disabled.
     * ``vimModeIndicationChanged(color, text)``   Vim mode changed. Parameters contain color and text to be displayed on an indicator. See also ``vimModeIndication``
 
+    **Syntax parser**
+
+    Qutepart supports two syntax parsers. One of them is written in C (faster) and the
+    other in Python (slower). By default qutepart tries to load the faster parser and
+    falls back to the slower one if there are import errors.
+    If by some reasons a slower Python parser is preferred then qutepart can be
+    instructed not to try to import the C parser. In order to do so an environment
+    variable can be used (it needs to be set before the first import of qutepart), e.g.::
+
+        import os
+        os.environ['QPART_CPARSER'] = 'N'   # Python written syntax parser to be used
+
+        import qutepart
+
     **Public methods**
     '''
 
     userWarning = pyqtSignal(str)
     languageChanged = pyqtSignal(str)
-    syntaxLoaded = pyqtSignal(object)
     indentWidthChanged = pyqtSignal(int)
     indentUseTabsChanged = pyqtSignal(bool)
     eolChanged = pyqtSignal(str)
@@ -259,13 +270,13 @@ class Qutepart(QPlainTextEdit):
     _DEFAULT_COMPLETION_ENABLED = True
 
     _globalSyntaxManager = SyntaxManager()
-    entitySyntax = None
 
-    def __init__(self, *args):
+    def __init__(self,
+                 needMarkArea=True,
+                 needLineNumbers=True,
+                 needCompleter=True,
+                 *args):
         QPlainTextEdit.__init__(self, *args)
-        
-
-        
 
         self.setAttribute(Qt.WA_KeyCompression, False)  # vim can't process compressed keys
 
@@ -277,12 +288,17 @@ class Qutepart(QPlainTextEdit):
 
         self._eol = self._DEFAULT_EOL
         self._indenter = Indenter(self)
-        self.lineLengthEdge = None
-        self.lineLengthEdgeColor = Qt.red
+        self._lineLengthEdge = None
+        self._lineLengthEdgeColor = QColor(255, 0, 0, 128)
+        self._currentLineColor = QColor('#ffffa3')
         self._atomicModificationDepth = 0
 
         self.drawIncorrectIndentation = True
         self.drawAnyWhitespace = False
+        self._drawIndentations = True
+        self._drawSolidEdge = False
+        self._solidEdgeLine = EdgeLine(self)
+        self._solidEdgeLine.setVisible(False)
 
         self._rectangularSelection = RectangularSelection(self)
 
@@ -302,17 +318,22 @@ class Qutepart(QPlainTextEdit):
 
         self.completionThreshold = self._DEFAULT_COMPLETION_THRESHOLD
         self.completionEnabled = self._DEFAULT_COMPLETION_ENABLED
-        self._completer = Completer(self)
+        self._completer = None
+        if needCompleter:
+            self._completer = Completer(self)
 
         self._vim = None
 
         self._initActions()
 
-        self._lineNumberArea = qutepart.sideareas.LineNumberArea(self)
-        self._countCache = (-1, -1)
-        self._markArea = qutepart.sideareas.MarkArea(self)
+        self._margins = []
+        self._totalMarginWidth = -1
 
-        self._bookmarks = qutepart.bookmarks.Bookmarks(self, self._markArea)
+        if needLineNumbers:
+            self._lineNumberArea = qutepart.sideareas.LineNumberArea(self) # Legacy support
+            self.addMargin(self._lineNumberArea)
+        if needMarkArea:
+            self.addMargin(qutepart.sideareas.MarkArea(self))
 
         self._nonVimExtraSelections = []
         self._userExtraSelections = []  # we draw bracket highlighting, current line and extra selections by user
@@ -321,12 +342,7 @@ class Qutepart(QPlainTextEdit):
 
         self._lintMarks = {}
 
-        self.blockCountChanged.connect(self._updateLineNumberAreaWidth)
-        self.updateRequest.connect(self._updateSideAreas)
-        
-        # WARNING why did I comment this line before ?
         self.cursorPositionChanged.connect(self._updateExtraSelections)
-        
         self.textChanged.connect(self._dropUserExtraSelections)
         self.textChanged.connect(self._resetCachedText)
         self.textChanged.connect(self._clearLintMarks)
@@ -336,18 +352,7 @@ class Qutepart(QPlainTextEdit):
         fontFamily = fontFamilies.get(platform.system(), 'Monospace')
         self.setFont(QFont(fontFamily))
 
-        self._updateLineNumberAreaWidth(0)
-        self.overwriteHighlightColor = None
-        self.highlightColor = QColor('#ffffa3')
-        #self.highlightColor = QColor('#2CA2AE')
-        
         self._updateExtraSelections()
-        self.syntaxLoaded.connect(self.loadSyntax)
-        
-        
-        if(settings.get_option('editor/scroll_instead_of_wrap', False)):
-	        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap);
-        
 
     def terminate(self):
         """ Terminate Qutepart instance.
@@ -356,7 +361,8 @@ class Qutepart(QPlainTextEdit):
         Call it on close to free memory and stop background highlighting
         """
         self.text = ''
-        self._completer.terminate()
+        if self._completer:
+            self._completer.terminate()
 
         if self._highlighter is not None:
             self._highlighter.terminate()
@@ -373,7 +379,7 @@ class Qutepart(QPlainTextEdit):
             """
             action = QAction(text, self)
             if iconFileName is not None:
-                action.setIcon(QIcon(getIconPath(iconFileName)))
+                action.setIcon(getIcon(iconFileName))
 
             keySeq = shortcut if isinstance(shortcut, QKeySequence) else QKeySequence(shortcut)
             action.setShortcut(keySeq)
@@ -387,51 +393,81 @@ class Qutepart(QPlainTextEdit):
         # scrolling
         self.scrollUpAction = createAction('Scroll up', 'Ctrl+Up',
                                            lambda: self._onShortcutScroll(down = False),
-                                           'up.png')
+                                           'go-up')
         self.scrollDownAction = createAction('Scroll down', 'Ctrl+Down',
                                              lambda: self._onShortcutScroll(down = True),
-                                             'down.png')
+                                             'go-down')
         self.selectAndScrollUpAction = createAction('Select and scroll Up', 'Ctrl+Shift+Up',
                                                     lambda: self._onShortcutSelectAndScroll(down = False))
         self.selectAndScrollDownAction = createAction('Select and scroll Down', 'Ctrl+Shift+Down',
                                                       lambda: self._onShortcutSelectAndScroll(down = True))
 
         # indentation
-        if EverydayPart.tabAlwaysIndent:
-	        self.increaseIndentAction = createAction('Increase indentation', 'Tab',
+        self.increaseIndentAction = createAction('Increase indentation', 'Tab',
                                                  self._onShortcutIndent,
-                                                 'indent.png')
+                                                 'format-indent-more')
         self.decreaseIndentAction = createAction('Decrease indentation', 'Shift+Tab',
                             lambda: self._indenter.onChangeSelectedBlocksIndent(increase = False),
-                            'unindent.png')
+                            'format-indent-less')
         self.autoIndentLineAction = createAction('Autoindent line', 'Ctrl+I',
                                                   self._indenter.onAutoIndentTriggered)
-        self.indentWithSpaceAction = createAction('Indent with 1 space', 'Shift+Space',
+        self.indentWithSpaceAction = createAction('Indent with 1 space', 'Ctrl+Shift+Space',
                         lambda: self._indenter.onChangeSelectedBlocksIndent(increase=True,
                                                                               withSpace=True))
-        self.unIndentWithSpaceAction = createAction('Unindent with 1 space', 'Shift+Backspace',
+        self.unIndentWithSpaceAction = createAction('Unindent with 1 space', 'Ctrl+Shift+Backspace',
                             lambda: self._indenter.onChangeSelectedBlocksIndent(increase=False,
                                                                                   withSpace=True))
 
         # editing
         self.undoAction = createAction('Undo', QKeySequence.Undo,
-                                       self.undo, 'undo.png')
+                                       self.undo, 'edit-undo')
         self.redoAction = createAction('Redo', QKeySequence.Redo,
-                                       self.redo, 'redo.png')
+                                       self.redo, 'edit-redo')
 
         self.moveLineUpAction = createAction('Move line up', 'Alt+Up',
-                                             lambda: self._onShortcutMoveLine(down = False), 'up.png')
+                                             lambda: self._onShortcutMoveLine(down = False), 'go-up')
         self.moveLineDownAction = createAction('Move line down', 'Alt+Down',
-                                               lambda: self._onShortcutMoveLine(down = True), 'down.png')
-        self.deleteLineAction = createAction('Delete line', 'Alt+Del', self._onShortcutDeleteLine, 'deleted.png')
-        self.copyLineAction = createAction('Copy line', 'Alt+C', self._onShortcutCopyLine, 'copy.png')
-        self.pasteLineAction = createAction('Paste line', 'Alt+V', self._onShortcutPasteLine, 'paste.png')
-        self.cutLineAction = createAction('Cut line', 'Alt+X', self._onShortcutCutLine, 'cut.png')
+                                               lambda: self._onShortcutMoveLine(down = True), 'go-down')
+        self.deleteLineAction = createAction('Delete line', 'Alt+Del', self._onShortcutDeleteLine, 'edit-delete')
+        self.cutLineAction = createAction('Cut line', 'Alt+X', self._onShortcutCutLine, 'edit-cut')
+        self.copyLineAction = createAction('Copy line', 'Alt+C', self._onShortcutCopyLine, 'edit-copy')
+        self.pasteLineAction = createAction('Paste line', 'Alt+V', self._onShortcutPasteLine, 'edit-paste')
         self.duplicateLineAction = createAction('Duplicate line', 'Alt+D', self._onShortcutDuplicateLine)
-        self.invokeCompletionAction = createAction('Invoke completion', 'Ctrl+Space', self._completer.invokeCompletion)
+        self.invokeCompletionAction = createAction('Invoke completion', 'Ctrl+Space', self._onCompletion)
+        
+        # DAIMAO
+        self.copyAction = createAction('Copy', 'Ctrl+C', self.copy, 'copy.png')
+        self.cutAction = createAction('Cut', 'Ctrl+X', self.cut, 'cut.png')
+        self.paste = createAction('paste', 'Ctrl+V', self.paste, 'paste.png')
 
         # other
-        self.printAction = createAction('Print', 'Ctrl+P', self._onShortcutPrint, 'print.png')
+        self.printAction = createAction('Print', 'Ctrl+P', self._onShortcutPrint, 'document-print')
+        
+        #DAIMAO
+        self.lineClipBoard = None
+        
+    # DAIMAO
+    def paste(self):
+           
+            text = QApplication.clipboard().text()
+            if  text == self.lineClipBoard:
+                self._onShortcutPasteLine()
+            else:
+                QPlainTextEdit.paste(self)
+                
+    def copy(self):
+            print('copy', self.selectedText)
+            if self.selectedText == '':
+                self._onShortcutCopyLine()
+            else:
+                QPlainTextEdit.copy(self)
+                
+    def cut(self):
+            print('cut', self.selectedText)
+            if self.selectedText == '':
+                self._onShortcutCutLine()
+            else:
+                QPlainTextEdit.cut(self)
 
     def __enter__(self):
         """Context management method.
@@ -461,7 +497,13 @@ class Qutepart(QPlainTextEdit):
         self._updateTabStopWidth()
 
         # text on line numbers may overlap, if font is bigger, than code font
-        self._lineNumberArea.setFont(font)
+        # Note: the line numbers margin recalculates its width and if it has
+        #       been changed then it calls updateViewport() which in turn will
+        #       update the solid edge line geometry. So there is no need of an
+        #       explicit call self._setSolidEdgeGeometry() here.
+        lineNumbersMargin = self.getMargin("line_numbers")
+        if lineNumbersMargin:
+            lineNumbersMargin.setFont(font)
 
     def showEvent(self, ev):
         pass  # suppress dockstring for non-public method
@@ -643,7 +685,7 @@ class Qutepart(QPlainTextEdit):
             self.update()
 
     def _clearLintMarks(self):
-        if self._lintMarks != {}:
+        if not self._lintMarks:
             self._lintMarks = {}
             self.update()
 
@@ -670,6 +712,59 @@ class Qutepart(QPlainTextEdit):
             return self._vim.indication()
         else:
             return (None, None)
+
+    @property
+    def drawSolidEdge(self):
+        return self._drawSolidEdge
+
+    @drawSolidEdge.setter
+    def drawSolidEdge(self, val):
+        self._drawSolidEdge = val
+        if val:
+            self._setSolidEdgeGeometry()
+        self.viewport().update()
+        self._solidEdgeLine.setVisible(val and self._lineLengthEdge is not None)
+
+    @property
+    def drawIndentations(self):
+        return self._drawIndentations
+
+    @drawIndentations.setter
+    def drawIndentations(self, val):
+        self._drawIndentations = val
+        self.viewport().update()
+
+    @property
+    def lineLengthEdge(self):
+        return self._lineLengthEdge
+
+    @lineLengthEdge.setter
+    def lineLengthEdge(self, val):
+        if self._lineLengthEdge != val:
+            self._lineLengthEdge = val
+            self.viewport().update()
+            self._solidEdgeLine.setVisible(val is not None and self._drawSolidEdge)
+
+    @property
+    def lineLengthEdgeColor(self):
+        return self._lineLengthEdgeColor
+
+    @lineLengthEdgeColor.setter
+    def lineLengthEdgeColor(self, val):
+        if self._lineLengthEdgeColor != val:
+            self._lineLengthEdgeColor = val
+            if self._lineLengthEdge is not None:
+                self.viewport().update()
+
+    @property
+    def currentLineColor(self):
+        return self._currentLineColor
+
+    @currentLineColor.setter
+    def currentLineColor(self, val):
+        if self._currentLineColor != val:
+            self._currentLineColor = val
+            self.viewport().update()
 
     def replaceText(self, pos, length, text):
         """Replace length symbols from ``pos`` with new text.
@@ -700,7 +795,6 @@ class Qutepart(QPlainTextEdit):
         """
         return self.replaceText(pos, 0, text)
 
-
     def detectSyntax(self,
                      xmlFileName=None,
                      mimeType=None,
@@ -723,48 +817,26 @@ class Qutepart(QPlainTextEdit):
         oldLanguage = self.language()
 
         self.clearSyntax()
-        
-        @threaded
-        def loadSyntax():
-                if(Qutepart.entitySyntax is not None and xmlFileName == 'entity.xml'):
-                        syntax = self.entitySyntax
-                else:
-                        syntax = self._globalSyntaxManager.getSyntax(SyntaxHighlighter.formatConverterFunction,
-                                                     xmlFileName=xmlFileName,
+
+        syntax = self._globalSyntaxManager.getSyntax(xmlFileName=xmlFileName,
                                                      mimeType=mimeType,
                                                      languageName=language,
                                                      sourceFilePath=sourceFilePath,
                                                      firstLine=firstLine)
-                        if(Qutepart.entitySyntax is None and xmlFileName == 'entity.xml'):
-                                Qutepart.entitySyntax = syntax
-                #self._highlighter = SyntaxHighlighter(syntax, self)
-                self.syntaxLoaded.emit(syntax, )
-                print('FIRST')
-                
-        loadSyntax()
 
-
-        #if syntax is not None:
-            #self._highlighter = SyntaxHighlighter(syntax, self)
-            #self._indenter.setSyntax(syntax)
-
-        #newLanguage = self.language()
-        #if oldLanguage != newLanguage:
-            #self.languageChanged.emit(newLanguage)
-
-        #return syntax is not None
-    def loadSyntax(self, syntax):
-        print('SECOND')
         if syntax is not None:
             self._highlighter = SyntaxHighlighter(syntax, self)
             self._indenter.setSyntax(syntax)
+            if self._completer:
+                keywords = {kw for kwList in syntax.parser.lists.values() for kw in kwList}
+                self._completer.setKeywords(keywords)
 
         newLanguage = self.language()
-        #if oldLanguage != newLanguage:
-            #self.languageChanged.emit(newLanguage)
+        if oldLanguage != newLanguage:
+            self.languageChanged.emit(newLanguage)
 
         return syntax is not None
-        
+
     def clearSyntax(self):
         """Clear syntax. Disables syntax highlighting
 
@@ -784,6 +856,18 @@ class Qutepart(QPlainTextEdit):
         else:
             return self._highlighter.syntax().name
 
+    def setCustomCompletions(self, wordSet):
+        """Add a set of custom completions to the editors completions.
+
+        This set is managed independently of the set of keywords and words from
+        the current document, and can thus be changed at any time.
+
+        """
+        if not isinstance(wordSet, set):
+            raise TypeError('"wordSet" is not a set: %s' % type(wordSet))
+        if self._completer:
+            self._completer.setCustomCompletions(wordSet)
+
     def isHighlightingInProgress(self):
         """Check if text highlighting is still in progress
         """
@@ -799,7 +883,6 @@ class Qutepart(QPlainTextEdit):
             block = blockOrBlockNumber
         else:
             block = self.document().findBlockByNumber(blockOrBlockNumber)
-
 
         return self._highlighter is None or \
                self._highlighter.isCode(block, column)
@@ -846,7 +929,6 @@ class Qutepart(QPlainTextEdit):
             cursor.setPosition(startAbsolutePosition + length, QTextCursor.KeepAnchor)
             selection.cursor = cursor
             selection.format = self._userExtraSelectionFormat
-            #selection.format.setProperty(QTextFormat.FullWidthSelection, True)
             return selection
 
         self._userExtraSelections = [_makeQtExtraSelection(*item) for item in selections]
@@ -872,45 +954,58 @@ class Qutepart(QPlainTextEdit):
         return (block.blockNumber(),
                 absPosition - block.position())
 
-    def _updateLineNumberAreaWidth(self, newBlockCount):
-        """Set line number are width according to current lines count
+    def updateViewport(self):
+        pass # suppress docstring for non-public method
+        """Recalculates geometry for all the margins and the editor viewport
         """
-        self.setViewportMargins(self._lineNumberArea.width() + self._markArea.width(), 0, 0, 0)
+        cr = self.contentsRect()
+        currentX = cr.left()
+        top = cr.top()
+        height = cr.height()
 
-    def _updateSideAreas(self, rect, dy):
-        """Repaint line number area if necessary
+        totalMarginWidth = 0
+        for margin in self._margins:
+            if not margin.isHidden():
+                width = margin.width()
+                margin.setGeometry(QRect(currentX, top, width, height))
+                currentX += width
+                totalMarginWidth += width
+
+        if self._totalMarginWidth != totalMarginWidth:
+            self._totalMarginWidth = totalMarginWidth
+            self.updateViewportMargins()
+        else:
+            self._setSolidEdgeGeometry()
+
+    def updateViewportMargins(self):
+        pass # suppress docstring for non-public method
+        """Sets the viewport margins and the solid edge geometry
         """
-        # _countCache magic taken from Qt docs Code Editor Example
-        if dy:
-            self._lineNumberArea.scroll(0, dy)
-            self._markArea.scroll(0, dy)
-        elif self._countCache[0] != self.blockCount() or \
-             self._countCache[1] != self.textCursor().block().lineCount():
-
-            # if block height not added to rect, last line number sometimes is not drawn
-            blockHeight = self.blockBoundingRect(self.firstVisibleBlock()).height()
-
-            self._lineNumberArea.update(0, rect.y(), self._lineNumberArea.width(), int(rect.height() + blockHeight))
-            self._lineNumberArea.update(0, rect.y(), self._markArea.width(), int(rect.height() + blockHeight))
-        self._countCache = (self.blockCount(), self.textCursor().block().lineCount())
-
-        if rect.contains(self.viewport().rect()):
-            self._updateLineNumberAreaWidth(0)
+        self.setViewportMargins(self._totalMarginWidth, 0, 0, 0)
+        self._setSolidEdgeGeometry()
 
     def resizeEvent(self, event):
-        pass # suppress dockstring for non-public method
+        pass # suppress docstring for non-public method
         """QWidget.resizeEvent() implementation.
         Adjust line number area
         """
         QPlainTextEdit.resizeEvent(self, event)
+        self.updateViewport()
+        return
 
-        cr = self.contentsRect()
-        self._lineNumberArea.setGeometry(QRect(cr.left(), cr.top(), self._lineNumberArea.width(), cr.height()))
+    def _setSolidEdgeGeometry(self):
+        """Sets the solid edge line geometry if needed"""
+        if self._lineLengthEdge is not None:
+            cr = self.contentsRect()
 
-        self._markArea.setGeometry(QRect(cr.left() + self._lineNumberArea.width(),
-                                         cr.top(),
-                                         self._markArea.width(),
-                                         cr.height()))
+            # contents margin usually gives 1
+            # cursor rectangle left edge for the very first character usually
+            # gives 4
+            x = self.fontMetrics().width('9' * self._lineLengthEdge) + \
+                self._totalMarginWidth + \
+                self.contentsMargins().left() + \
+                self.__cursorRect(self.firstVisibleBlock(), 0, offset=0).left()
+            self._solidEdgeLine.setGeometry(QRect(x, cr.top(), 1, cr.bottom()))
 
     def _insertNewBlock(self):
         """Enter pressed.
@@ -1037,7 +1132,7 @@ class Qutepart(QPlainTextEdit):
                     super(Qutepart, self).keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
-        if self._lastKeyPressProcessedByParent:
+        if self._lastKeyPressProcessedByParent and self._completer is not None:
             """ A hacky way to do not show completion list after a event, processed by vim
             """
 
@@ -1124,21 +1219,16 @@ class Qutepart(QPlainTextEdit):
         """
         painter = QPainter(self.viewport())
 
-        def cursorRect(block, column, offset):
-            cursor = QTextCursor(block)
-            setPositionInBlock(cursor, column)
-            return self.cursorRect(cursor).translated(offset, 0)
-
         def drawWhiteSpace(block, column, char):
-            leftCursorRect = cursorRect(block, column, 0)
-            rightCursorRect = cursorRect(block, column + 1, 0)
+            leftCursorRect = self.__cursorRect(block, column, 0)
+            rightCursorRect = self.__cursorRect(block, column + 1, 0)
             if leftCursorRect.top() == rightCursorRect.top():  # if on the same visual line
-                middleHeight = int((leftCursorRect.top() + leftCursorRect.bottom()) / 2)
+                middleHeight = int( (leftCursorRect.top() + leftCursorRect.bottom()) / 2) # 2025_VERSION force int
                 if char == ' ':
                     painter.setPen(Qt.transparent)
                     painter.setBrush(QBrush(Qt.gray))
-                    xPos = int((leftCursorRect.x() + rightCursorRect.x()) / 2)
-                    painter.drawRect(QRect(xPos, middleHeight, 2, 2))
+                    xPos = int((leftCursorRect.x() + rightCursorRect.x()) / 2) # 2025_VERSION force int
+                    painter.drawRect(QRect(int(xPos), int(middleHeight), 2, 2))
                 else:
                     painter.setPen(QColor(Qt.gray).lighter(factor=120))
                     painter.drawLine(leftCursorRect.x() + 3, middleHeight,
@@ -1146,16 +1236,16 @@ class Qutepart(QPlainTextEdit):
 
         def effectiveEdgePos(text):
             """Position of edge in a block.
-            Defined by self.lineLengthEdge, but visible width of \t is more than 1,
+            Defined by self._lineLengthEdge, but visible width of \t is more than 1,
             therefore effective position depends on count and position of \t symbols
             Return -1 if line is too short to have edge
             """
-            if self.lineLengthEdge is None:
+            if self._lineLengthEdge is None:
                 return -1
 
             tabExtraWidth = self.indentWidth - 1
             fullWidth = len(text) + (text.count('\t') * tabExtraWidth)
-            if fullWidth <= self.lineLengthEdge:
+            if fullWidth <= self._lineLengthEdge:
                 return -1
 
             currentWidth = 0
@@ -1165,19 +1255,19 @@ class Qutepart(QPlainTextEdit):
                     currentWidth += (self.indentWidth - (currentWidth % self.indentWidth))
                 else:
                     currentWidth += 1
-                if currentWidth > self.lineLengthEdge:
+                if currentWidth > self._lineLengthEdge:
                     return pos
             else:  # line too narrow, probably visible \t width is small
                 return -1
 
         def drawEdgeLine(block, edgePos):
-            painter.setPen(QPen(QBrush(self.lineLengthEdgeColor), 0))
-            rect = cursorRect(block, edgePos, 0)
+            painter.setPen(QPen(QBrush(self._lineLengthEdgeColor), 0))
+            rect = self.__cursorRect(block, edgePos, 0)
             painter.drawLine(rect.topLeft(), rect.bottomLeft())
 
         def drawIndentMarker(block, column):
             painter.setPen(QColor(Qt.blue).lighter())
-            rect = cursorRect(block, column, offset=0)
+            rect = self.__cursorRect(block, column, offset=0)
             painter.drawLine(rect.topLeft(), rect.bottomLeft())
 
         indentWidthChars = len(self._indenter.text())
@@ -1191,26 +1281,28 @@ class Qutepart(QPlainTextEdit):
             if block.isVisible() and blockGeometry.toRect().intersects(paintEventRect):
 
                 # Draw indent markers, if good indentation is not drawn
-                text = block.text()
-                if not self.drawAnyWhitespace:
-                    column = indentWidthChars
-                    while text.startswith(self._indenter.text()) and \
-                          len(text) > indentWidthChars and \
-                          text[indentWidthChars].isspace():
+                if self._drawIndentations:
+                    text = block.text()
+                    if not self.drawAnyWhitespace:
+                        column = indentWidthChars
+                        while text.startswith(self._indenter.text()) and \
+                              len(text) > indentWidthChars and \
+                              text[indentWidthChars].isspace():
 
-                        if column != self.lineLengthEdge and \
-                           (block.blockNumber(), column) != cursorPos:  # looks ugly, if both drawn
-                            """on some fonts line is drawn below the cursor, if offset is 1
-                            Looks like Qt bug"""
-                            drawIndentMarker(block, column)
+                            if column != self._lineLengthEdge and \
+                               (block.blockNumber(), column) != cursorPos:  # looks ugly, if both drawn
+                                """on some fonts line is drawn below the cursor, if offset is 1
+                                Looks like Qt bug"""
+                                drawIndentMarker(block, column)
 
-                        text = text[indentWidthChars:]
-                        column += indentWidthChars
+                            text = text[indentWidthChars:]
+                            column += indentWidthChars
 
                 # Draw edge, but not over a cursor
-                edgePos = effectiveEdgePos(block.text())
-                if edgePos != -1 and edgePos != cursorPos[1]:
-                    drawEdgeLine(block, edgePos)
+                if not self._drawSolidEdge:
+                    edgePos = effectiveEdgePos(block.text())
+                    if edgePos != -1 and edgePos != cursorPos[1]:
+                        drawEdgeLine(block, edgePos)
 
                 if self.drawAnyWhitespace or \
                    self.drawIncorrectIndentation:
@@ -1230,17 +1322,12 @@ class Qutepart(QPlainTextEdit):
     def _currentLineExtraSelections(self):
         """QTextEdit.ExtraSelection, which highlightes current line
         """
-        #self.highlightColor = QColor('#2CA2AE')
-        if(self.overwriteHighlightColor != None):
-        	lineColor = self.overwriteHighlightColor
-        else:
-        	
-	        lineColor = self.highlightColor
-        
+        if self._currentLineColor is None:
+            return []
+
         def makeSelection(cursor):
             selection = QTextEdit.ExtraSelection()
-            selection.format.setBackground(lineColor)
-            
+            selection.format.setBackground(self._currentLineColor)
             selection.format.setProperty(QTextFormat.FullWidthSelection, True)
             cursor.clearSelection()
             selection.cursor = cursor
@@ -1254,16 +1341,6 @@ class Qutepart(QPlainTextEdit):
             return [makeSelection(self.textCursor())]
 
     def _updateExtraSelections(self):
-        
-        
-        
-        if(self.updatingCursor):return
-    
-        if(self.highlightCurrentWordJustFinished):
-            self.highlightCurrentWordJustFinished = False
-            return
-    
-        print("updating cursor updateExtra")
         """Highlight current line
         """
         cursorColumnIndex = self.textCursor().positionInBlock()
@@ -1366,7 +1443,6 @@ class Qutepart(QPlainTextEdit):
         cursor.setPosition(endBlock.position(), QTextCursor.KeepAnchor)
         cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
         self.setTextCursor(cursor)
-        
 
     def _selectedBlocks(self):
         """Return selected blocks and tuple (startBlock, endBlock)
@@ -1403,7 +1479,9 @@ class Qutepart(QPlainTextEdit):
                 return
 
             # if operaiton is UnDone, marks are located incorrectly
-            self._bookmarks.clear(startBlock, endBlock.next())
+            markMargin = self.getMargin("mark_area")
+            if markMargin:
+                markMargin.clearBookmarks(startBlock, endBlock.next())
 
             _moveBlock(blockToMove, startBlockNumber)
 
@@ -1414,13 +1492,16 @@ class Qutepart(QPlainTextEdit):
                 return
 
             # if operaiton is UnDone, marks are located incorrectly
-            self._bookmarks.clear(startBlock.previous(), endBlock)
+            markMargin = self.getMargin("mark_area")
+            if markMargin:
+                markMargin.clearBookmarks(startBlock, endBlock)
 
             _moveBlock(blockToMove, endBlockNumber)
 
             self._selectLines(startBlockNumber - 1, endBlockNumber - 1)
 
-        self._markArea.update()
+        if markMargin:
+            markMargin.update()
 
     def _selectedLinesSlice(self):
         """Get slice of selected lines
@@ -1438,6 +1519,7 @@ class Qutepart(QPlainTextEdit):
         """
         lines = self.lines[self._selectedLinesSlice()]
         text = self._eol.join(lines)
+        self.lineClipBoard = text # DAIMAO
         QApplication.clipboard().setText(text)
 
     def _onShortcutPasteLine(self):
@@ -1494,12 +1576,64 @@ class Qutepart(QPlainTextEdit):
             printer = dialog.printer()
             self.print_(printer)
 
+    def _onCompletion(self):
+        """Ctrl+Space handler.
+        Invoke completer if so configured
+        """
+        if self._completer:
+            self._completer.invokeCompletion()
+
     def insertFromMimeData(self, source):
         pass # suppress docstring for non-public method
         if source.hasFormat(self._rectangularSelection.MIME_TYPE):
             self._rectangularSelection.paste(source)
         else:
             super(Qutepart, self).insertFromMimeData(source)
+
+    def __cursorRect(self, block, column, offset):
+        cursor = QTextCursor(block)
+        setPositionInBlock(cursor, column)
+        return self.cursorRect(cursor).translated(offset, 0)
+
+    def getMargins(self):
+        """Provides the list of margins
+        """
+        return self._margins
+
+    def addMargin(self, margin, index=None):
+        """Adds a new margin.
+           index: index in the list of margins. Default: to the end of the list
+        """
+        if index is None:
+            self._margins.append(margin)
+        else:
+            self._margins.insert(index, margin)
+        if margin.isVisible():
+            self.updateViewport()
+
+    def getMargin(self, name):
+        """Provides the requested margin.
+           Returns a reference to the margin if found and None otherwise
+        """
+        for margin in self._margins:
+            if margin.getName() == name:
+                return margin
+        return None
+
+    def delMargin(self, name):
+        """Deletes a margin.
+           Returns True if the margin was deleted and False otherwise.
+        """
+        for index, margin in enumerate(self._margins):
+            if margin.getName() == name:
+                visible = margin.isVisible()
+                margin.clear()
+                margin.deleteLater()
+                del self._margins[index]
+                if visible:
+                    self.updateViewport()
+                return True
+        return False
 
 
 def iterateBlocksFrom(block):
@@ -1515,367 +1649,3 @@ def iterateBlocksBackFrom(block):
     while block.isValid():
         yield block
         block = block.previous()
-
-
-from common import settings, util
-
-class EverydayPart(Qutepart):
-	
-	toolTipEvent = pyqtSignal(int, str, object)
-	newExtraSelection = pyqtSignal(object)
-	tabAlwaysIndent = True
-
-	def __init__(self, *args):
-		
-		self.updatingCursor = False
-		self.highlightCurrentWordJustFinished = False
-		# self.mousePressed = False
-		Qutepart.__init__(self, *args)
-		
-		self.completionEnabled = settings.get_option('editor/completion_enabled', True)
-		
-		
-		SyntaxHighlighter.FORCE_BOLD = settings.get_option('editor/force_bold', True)
-		# SyntaxHighlighter.FORCE_BOLD = False
-		
-		self.selectionChanged.connect(self.highlightCurrentWord)
-		#self.newExtraSelection.connect(self.addExtraSelection)
-		
-		self.wordHighlighted = False
-		self.mousePressed = False
-		
-		self.searchColor = QColor('#ffffa3')
-		
-		ovw_highlight_color = settings.get_option('editor/color_highlighted_line', None)
-		
-		if(ovw_highlight_color != None):
-			self.overwriteHighlightColor = QColor(ovw_highlight_color)
-
-		
-		self.initialSearchPos = None
-		
-	def addExtraSelection(self, selection):
-		pass
-	
-	def dropEvent(self, e):
-		data = QMimeData()
-		text = e.mimeData().text()
-		data_path = settings.get_option('general/data_path', '')
-		newText = []
-		first = True
-		
-		extensionsToCheck = ('.wav', '.ogg', '.bor')
-		
-		
-		for line in text.split('\n'):
-
-			if data_path in line:
-				#print(line)
-				command = 'frame'
-				#if line.endswith(extensionsToCheck):
-				if any(x in line for x in extensionsToCheck):
-					command = 'sound'
-				newLine = '	' + command + ' data' + line[line.index(data_path)+len(data_path):]
-				if first:
-					newLine = '\n' + newLine
-				newText.append(newLine)
-			else:
-				newText.append(line)
-			
-			if first:
-				first = False
-		data.setText('\n'.join(newText))
-		#data.setUrls([])
-		e = QDropEvent(e.pos(), e.dropAction(), data, e.mouseButtons(), e.keyboardModifiers())
-		
-		Qutepart.dropEvent(self, e)
-		
-	def event(self, e):
-		if e.type() == QEvent.ToolTip:
-			#QHelpEvent* helpEvent = static_cast<QHelpEvent*>(event);
-			start, end = self.selectedPosition
-			if start != end:
-				self.toolTipEvent.emit(start, self.selectedText, e)
-			else:
-				cursor = self.cursorForPosition(e.pos())
-				cursor.select(QTextCursor.LineUnderCursor)
-				line = cursor.block().blockNumber()
-				if (len(cursor.selectedText())!= 0):
-					self.toolTipEvent.emit(line, cursor.selectedText(), e)
-			return True
-
-		return Qutepart.event(self, e)
-		
-		
-	def keyPressEvent(self, e):
-		if e.text() == '	' and EverydayPart.tabAlwaysIndent: # tab
-			start, end = self.selectedPosition
-			start = start[0]
-			end = end[0]
-			if end < start:
-				tmp = end
-				end = start
-				start = tmp
-			#line, col = self.cursorPosition
-			for line in range(start, end+1):
-				self.insertText((line, 0), e.text())
-
-		else:
-			Qutepart.keyPressEvent(self, e)
-		
-	def mousePressEvent(self, e):
-		self.mousePressed = True
-		Qutepart.mousePressEvent(self, e)
-		
-	def mouseReleaseEvent(self, e):
-		self.mousePressed = False
-		Qutepart.mouseReleaseEvent(self, e)
-		
-	
-	def getContext(self, blockNumber, col=None):
-		block = self.document().findBlockByNumber(blockNumber)
-		data = block.userData().data[0].currentContext()
-		data = data.name
-		
-		return data
-	
-	def saveScroll(self):
-		self.previousScroll = self.verticalScrollBar().sliderPosition()
-		print('saveScroll', self.previousScroll)
-		
-	def restoreScroll(self):
-		self.verticalScrollBar().setSliderPosition(self.previousScroll)
-
-	def highlightCurrentWord(self): # PROBABLY DAIMAO
-		print("highlight current word");
-		
-		
-	
-		#@threaded
-		def buildFormat():
-			#selection = QTextEdit.ExtraSelection()
-			#cursor = self.textCursor()
-			#selection.format.setBackground(self.searchColor)
-			#selection.cursor = cursor
-			#format.setForeground(Qt.black);
-			regex = QRegExp(word)
-			# Process the displayed document
-			pos = 0
-			index = regex.indexIn(self.text, pos)
-			
-			previousScroll = self.verticalScrollBar().sliderPosition()
-			previousSelected = self.selectedPosition
-			
-			self.moveCursor(QTextCursor.Start);
-			extraSelections = []
-			while self.find(word):
-				print("found")
-				selection = QTextEdit.ExtraSelection()
-				selection.cursor = self.textCursor()
-				selection.format.setBackground(self.searchColor)
-				extraSelections.append(selection)
-				
-			#for e in extraSelections:
-				#print(e.cursor.block().text())
-			
-			
-			QPlainTextEdit.setExtraSelections(self, extraSelections)
-			
-			
-			#while (index != -1 and index != 0):
-				## Select the matched text and apply the desired format
-				#cursor.setPosition(index)
-				#cursor.movePosition(QTextCursor.EndOfWord, 1)
-				##cursor.mergeCharFormat(selection.format)
-				
-				##selection.append(
-				## Move to the next match
-				#pos = index + regex.matchedLength()
-				#index = regex.indexIn(self.text, pos)
-			
-			self.selectedPosition = previousSelected
-			self.verticalScrollBar().setSliderPosition(previousScroll)
-			endBuild()
-
-		
-		def endBuild():
-			self.updatingCursor = False
-			self.highlightCurrentWordJustFinished = True 
-
-			#self.selectionChanged.connect(self.highlightCurrentWord)
-			if self._highlighter != None:
-				return
-				self._highlighter._document.contentsChange.connect(self._highlighter._onContentsChange)
-				
-		
-		if self.updatingCursor or self.mousePressed: return
-	
-		# self.blockSignals(True)
-		self.updatingCursor = True
-		word = self.selectedText
-		# print('word', '|' + word + '|')
-		if len(word) == 0 or word[0] in ('\t', ' ') or word[-1] in ('\t', ' '):
-			self.setExtraSelections([])
-			#QPlainTextEdit.setExtraSelections(self, [])
-			self.updatingCursor = False
-			self.blockSignals(False)
-			return
-		
-		
-		# print('word', 'continue')
-		#try:
-			#if self._highlighter != None:
-				#self._highlighter._document.contentsChange.disconnect(self._highlighter._onContentsChange)
-		#except TypeError:
-			#pass
-		#self._highlighter
-		
-		#self.selectionChanged.disconnect(self.highlightCurrentWord)
-		
-		# Reset previous
-		self.updatingCursor = True
-		#cursor = self.textCursor()
-		#cursor.movePosition(QTextCursor.Start, QTextCursor.MoveAnchor);
-		#cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor);
-		
-		#cursor.setCharFormat(QTextCharFormat())
-
-		#word = self.selectedText
-		#if len(word) == 0 :
-			##if self.wordHighlighted:
-				##self.wordHighlighted = False
-			#endBuild()
-			#return
-
-		
-		#QSignalBlocker(self.document())
-		#
-		
-		self.updatingCursor = False
-		
-		
-		
-		
-		start, end = self.absSelectedPosition
-		if start > end:
-			tmp = start
-			start = end
-			end = tmp
-
-		if start == 0:
-			startChar = ' '
-		else:
-			startChar = self.text[ start-1]
-			
-		if end >= len(self.text):  # End of text
-			endChar = ' '
-		else : endChar = self.text[ end]
-		
-		print(startChar, endChar)
-		
-		delimiters = ('.', ',', ' ', '	', '-', ';', '(', ')', '{', '}', '/', '\n')
-		#print('here', startChar, endChar)
-		if(startChar not in delimiters  or endChar not in delimiters) : return
-		#print('good')
-		
-		self.updatingCursor = True
-
-		# print('word', 'continue 2')
-		buildFormat()
-		# self.blockSignals(False)
-		
-		#cursor.select(QTextCursor.WordUnderCursor);
-		
-		
-
-		##cursor.setPosition(begin, QTextCursor.MoveAnchor);
-		##cursor.setPosition(end, QTextCursor.KeepAnchor);
-		#cursor.setCharFormat(format)
-		##cursor.mergeCharFormat(fmt); # I did try also cursor.setCharFormat(fmt)
-
-	def search(self, text, searchForward=True, loop=True):
-		self.setCenterOnScroll(True)
-		
-		print('editor', self.initialSearchPos)
-		if(self.initialSearchPos == None):
-			self.initialSearchPos = self.textCursor()
-			
-		
-		print('text', text)
-		if(text == ''): 
-			#self.searchEntry.setStyleSheet("")
-			self.setTextCursor(self.initialSearchPos)
-			self.initialSearchPos = None
-			return False
-
-		if searchForward:
-			options = QtGui.QTextDocument.FindFlags()
-		else:
-			options = QtGui.QTextDocument.FindBackward
-		result = self.find(text, options) # first try to search from cursor to end of document
-		
-		if(result):
-			#self.searchEntry.setStyleSheet("QLineEdit { background: rgb(175, 255, 175); }");
-			return True
-		
-		elif(loop and not result):
-			self.moveCursor(QtGui.QTextCursor.Start)
-			if not self.find(text, options): # then try to search from start to end of document
-			
-			
-				# self.editor.moveCursor(self.editor.initialSearchPos)
-				self.setTextCursor(self.initialSearchPos)
-				self.initialSearchPos = None
-			
-			
-				#self.searchEntry.setStyleSheet("QLineEdit { background: rgb(255, 175, 175); }");
-				 # selection-background-color: rgb(233, 99, 0);
-				 
-				return False
-			else:
-				
-				#self.searchEntry.setStyleSheet("QLineEdit { background: rgb(175, 255, 175); }");
-				return True
-	
-	
-	def replace(self, text1, text2):
-		if(self.selectedText != ''):
-			self.selectedText = text2
-			self.search(text1)
-			
-	def replaceAllRaw(self, text, replaceWith):
-		self.updatingCursor = True
-		
-		if(self.selectedText == ''):
-		
-			lines = self.lines
-			newLines = []
-			for line in lines:
-				newLines.append(line.replace(text, replaceWith))
-			
-			self.lines = newLines
-		else:
-			self.selectedText = self.selectedText.replace(text, replaceWith)
-		self.updatingCursor = False
-	
-	def setTheme(self, data):
-		if data is None:
-			return
-		print(';'.join(data['css']))
-		self.setStyleSheet('QPlainTextEdit {' + ';'.join(data['css']) + '}')
-		self.searchColor = data['searchColor']
-		self.highlightColor = data['currentLine']
-		#self.highlightColor = QColor('#2CA2AE')
-	
-	
-	def wheelEvent(self, e):
-		if (e.modifiers() & Qt.ControlModifier):
-			if e.angleDelta().y() > 0:
-				step = 1
-			else:
-				step = -1
-			font = self.currentFont
-			font.setPointSize(font.pointSize()+step)
-			self.setFont(font)
-		else:
-			Qutepart.wheelEvent(self, e)

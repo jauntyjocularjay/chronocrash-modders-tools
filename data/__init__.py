@@ -9,6 +9,8 @@ import os, re, time
 from common.util import parseInt, parseFloat
 from common import settings
 
+import logging
+
 class ParsedLine:
 	def __init__(self, inputLine):
 		self.line = inputLine
@@ -131,8 +133,8 @@ class BBox:
 		self.y = 0
 		self.width = 0
 		self.height = 0
-		self.z1 = 0
-		self.z2 = 0
+		self.z1 = -100000
+		self.z2 = -100000
 		
 		self.delete = False # Flag used to not process when rebuilding text
 		
@@ -144,6 +146,7 @@ class BBox:
 		self.ogLineHeight = None
 		self.ogLineZ1 = None
 		self.ogLineZ2 = None
+		self.ogLineEmpty = False
 		
 		if params is not None:
 			if(isinstance(params, ParsedLine)):
@@ -164,17 +167,28 @@ class BBox:
 				self.z2 = params[5]
 			except:
 				pass
+				
+			if(self.isEmpty()):
+				self.ogLineEmpty = True
+				
 			
 	def getParams(self):
 		data = [self.x, self.y, self.width, self.height]
-		if self.z1 != 0:
+		if self.z1 != -100000:
 			data.append(self.z1)
-		if self.z2 != 0:
+		if self.z2 != -100000:
 			data.append(self.z2)
 		return data
 	
-	def getText(self):
-		legacy = settings.get_option('misc/legacy_commands', False)
+	def getText(self, forceLegacy=False):
+		legacy = forceLegacy or settings.get_option('misc/legacy_commands', False)
+		null_og_line_format = settings.get_option('misc/null_reuse_og_line_format', True)
+		null_collision_format = settings.get_option('entity/null_collision_format', 'none')
+		
+		if(self.isEmpty()):
+			if(null_og_line_format and self.ogLineEmpty and self.ogLine != None): return self.ogLine.line;
+			else : return '\tbbox ' + null_collision_format
+		
 		if legacy:
 			if(self.ogLine == None): # create new line
 				return '\tbbox ' + ' '.join(map(str, self.getParams())) 
@@ -208,9 +222,9 @@ class BBox:
 			if(self.ogLineX == None): # create new lines
 				data = ['\tbbox.position.x ' + str(self.x), '\tbbox.position.y ' + str(self.y),
 				'\tbbox.size.x ' + str(self.width), '\tbbox.size.y ' + str(self.height)]
-				if self.z1 != 0:
+				if self.z1 != -100000:
 					data.append('\tbbox.size.z.background ' + str(self.z1))
-				if self.z2 != 0:
+				if self.z2 != -100000:
 					data.append('\tbbox.size.z.foreground ' + str(self.z2))
 				return '\n'.join(data)
 				
@@ -247,11 +261,35 @@ class BBox:
 					i+=1
 					
 				while(numberOfParamsProcessed < len(params)): # params that were not present in ogLine, typically z1 and z2
-					recreatedLine = '\t' + BBox.FIELDS[numberOfParamsProcessed] + " " + str(params[numberOfParamsProcessed])
+					field = BBox.FIELDS[numberOfParamsProcessed]
+					if(field == 'z1'): field = 'z.1'
+					if(field == 'z2'):field  = 'z.2'
+					recreatedLine = '\t' + field + " " + str(params[numberOfParamsProcessed])
 					lines.append(recreatedLine)
 					numberOfParamsProcessed+=1
-					
+				logging.debug('elia ' + '\n'.join(lines))
 				return '\n'.join(lines)
+				
+				
+	def getCompactText(self):
+		legacy = settings.get_option('misc/legacy_commands', False)
+		null_og_line_format = settings.get_option('misc/null_reuse_og_line_format', True)
+		null_collision_format = settings.get_option('entity/null_collision_format', 'none')
+		
+		if legacy:
+			return self.getText()
+		else:
+			# return '	{attack ...}'
+			
+			if(self.isEmpty()): 
+				if(null_og_line_format and self.ogLineEmpty): return self.ogLine.line
+				else : return '\tbbox ' + null_collision_format
+			# else : return '	{bbox ...}\n' + self.getText()
+			else : return '	{' + self.getText(True).strip() + '}\n' + self.getText()
+			
+	def isEmpty(self):
+		return (self.x == 0 and self.y == 0 and self.width == 0 and self.height == 0)
+	
 					
 		
 class AttackBox:
@@ -294,6 +332,9 @@ class AttackBox:
 		self.ogLines = {}
 		self.phantom = False
 		
+		self.ogLineEmpty = False
+		
+		
 		
 		
 		self.data['block.penetrate'] = None
@@ -317,6 +358,8 @@ class AttackBox:
 		
 		self.overwriteWith(params)
 		
+		if(self.isEmpty()): self.ogLineEmpty = True
+		
 		
 			
 		
@@ -337,6 +380,7 @@ class AttackBox:
 		
 			
 	def getParams(self):
+		# print("getParams", self.data)
 		data = [self.data['damage.type'], parseInt(self.data['position.x']), parseInt(self.data['position.y']), parseInt(self.data['size.x']), parseInt(self.data['size.y']), parseInt(self.data['damage.force']), parseInt(self.data['reaction.fall.force']), parseInt(self.data['block.penetrate']), parseInt(self.data['effect.hit.flash.disable']), parseInt(self.data['reaction.pause.time'])]
 		#if self.z1 != 0:
 		# if self.data['size.z.background'] != None:
@@ -345,20 +389,36 @@ class AttackBox:
 			data.append(self.data['size.z.foreground'])
 		return data
 	
-	def getText(self, legacy=False):
-		legacy = settings.get_option('misc/legacy_commands', False)
+	def getText(self, forceLegacy=False, commandName=None, onlyEssential=False):
+		if forceLegacy and commandName != None and onlyEssential:
+			logging.debug("get Legacy compress")
+		
+		legacy = forceLegacy or settings.get_option('misc/legacy_commands', False)
+		null_og_line_format = settings.get_option('misc/null_reuse_og_line_format', True)
+		null_collision_format = settings.get_option('entity/null_collision_format', 'none')
+		
+		
+		
+		
+		if(self.isEmpty()): 
+			if(null_og_line_format and self.ogLineEmpty and self.ogLine != None): return self.ogLine.line;
+			else : return '\tattack ' + null_collision_format
+	
 		if legacy:
 			if(self.ogLine == None): # create new line
 				params = self.getParams()
 				if params[0] is None:
 					params[0] = ''
-				data = ['\tattack' + ' '.join(map(str, params))]
+				if commandName != None:
+					data = ['\t' + commandName + ' ' + ' '.join(map(str, params[1:]))]
+				else:
+					data = ['\tattack' + ' '.join(map(str, params))]
 				
 				if(self.phantom):
 					data = []
 				
 				
-				
+				# logging.debug("ALPHA" + str(data))
 				
 				
 				
@@ -376,14 +436,45 @@ class AttackBox:
 					if(isSpace(el)):
 						recreatedLine += el
 					elif (el is not None):
+						if(el.startswith('#')) : break
 						if(indexVal == -1):
-							recreatedLine += el # this is the "command" (e.g., bbox.position.x)
+							if(commandName != None):
+								# print('replace ', el, 'by', commandName)
+								recreatedLine += commandName
+							else:
+								recreatedLine += el # this is the "command" (e.g., bbox.position.x)
 						else:
 							#print(indexVal)
 							recreatedLine += str(params[indexVal])
 						indexVal += 1
-				print('recreated line', recreatedLine)
+				# At this point, there might be new parameters that were not in ogLine if ogLine was incomplete (for example if ogLine was just attack 5)
+				additionalParams = [];
+				
+				while(indexVal < len(params) and params[indexVal] != None):
+					additionalParams.append(str(params[indexVal]))
+					indexVal+=1
+				if(len(additionalParams) > 0):
+					addedOne = False
+					trail = ''
+					for i in range(len(additionalParams)-1, -1, -1):
+						if additionalParams[i] == '0' and not addedOne: # don't include empty trail of 0 0 0 0, only includes 0 that are in between values (5 0 6 for example)
+							continue
+						else:
+							trail = ' ' + additionalParams[i] + trail
+							addedOne = True
+					recreatedLine += trail
+					
+				com =  self.ogLine.getCom()
+				if com != '':
+					recreatedLine += '# ' + com.strip()
+				print('getText recreated line', recreatedLine)
 				data = [recreatedLine,]
+				# logging.debug("BETA" + str(data))
+				
+			if(onlyEssential):
+				if(len(data) == 0) : return '\tattack props'
+			
+				return '\n'.join(data)
 			
 			dropvLine = None
 			if self.data['reaction.fall.velocity.y'] != None:
@@ -400,6 +491,8 @@ class AttackBox:
 				hitflashLine = '\thitflash ' + str(self.data['effect.hit.flash.model'])
 			if hitflashLine is not None : data.append(hitflashLine)
 			
+			
+			# logging.debug("hitFlashLog " +  str(self.data['effect.hit.flash.model']) + " hitFX " + str(self.data['effect.hit.sound.path']))
 			hitfxLine = None
 			if self.data['effect.hit.sound.path'] != None:
 				hitfxLine = '\thitfx ' + str(self.data['effect.hit.sound.path'])
@@ -484,10 +577,36 @@ class AttackBox:
 			
 	def getCompactText(self):
 		legacy = settings.get_option('misc/legacy_commands', False)
+		
 		if legacy:
 			return self.getText()
 		else:
-			return '	{attack ...}'
+			# return '	{attack ...}'
+			
+			null_og_line_format = settings.get_option('misc/null_reuse_og_line_format', True)
+			null_collision_format = settings.get_option('entity/null_collision_format', 'none')
+			if(self.isEmpty()): 
+				if(null_og_line_format and self.ogLineEmpty): return self.ogLine.line;
+				else : return '\tattack ' + null_collision_format
+		
+			# else : return '	{attack ...}\n' + self.getText()
+			else : return '	{' + self.getText(True, 'attack', True).strip() + '}\n' + self.getText()
+	
+	
+	def isEmpty(self):
+		# emptyCoords = self.data['position.x'] in (0, None) and self.data['position.y'] in (0, None) and self.data['size.x'] in (0, None) and self.data['size.y'] in (0, None)
+		# if(not emptyCoords) return False
+	
+		for prop in self.data:
+			if prop == 'damage.type':
+				continue
+			if self.data[prop] not in (0, None):
+				return False
+				
+		return True
+	
+		
+	
 	
 	def loadLegacy(self, command, data):
 		if command == 'dropv':
@@ -610,6 +729,7 @@ class BindData:
 
 class FileWrapper:
 	def __init__(self, path):
+		self.charenc = None
 		self.path = path
 		
 	def getLines(self):
@@ -624,8 +744,18 @@ class FileWrapper:
 			# result = chardet.detect(rawdata)
 			# charenc = result['encoding']
 			charenc = chardet.detect(open(self.path, 'rb').read())['encoding']
+			# if charenc == 'Windows-1252': charenc = 'cp1252'
+			print(charenc)
+			self.charenc = charenc
 			f = open(self.path, encoding=charenc)
-			lines = f.read().split('\n')
+			try:
+				lines = f.read().split('\n')
+			except:
+			        # Ultimately, if it still crash, we open with errors "ignore" parameter
+				f.close()
+				f = open(self.path, encoding=charenc, errors='ignore')
+				lines = f.read().split('\n')
+				
 		f.close()
 		
 		return lines

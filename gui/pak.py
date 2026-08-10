@@ -14,6 +14,8 @@ OTHERS = ('.wav',)
 class PakWidget(QtWidgets.QWidget):
 	def __init__(self, parent):
 		QtWidgets.QWidget.__init__(self, parent)
+		
+		self.setMinimumSize(500,200)
 		self.parent = parent # prevent garbabe collector to delete parent dialog
 		layout = QtWidgets.QFormLayout()
 		
@@ -30,11 +32,36 @@ class PakWidget(QtWidgets.QWidget):
 		self.outCharsFolder = FileInput(self, 'folder', outCharsFolderPath, 'Select chars folder', dataPath)
 		layout.addRow(_('Publish chars folder') + ' : ', self.outCharsFolder)
 		
+		
+		
+		self.secondPassCheckbox = QtWidgets.QCheckBox(_('Enable second pass'))
+		self.secondPassCheckbox.setChecked(settings.get_option('pak/enable_second_pass', True))
+		self.secondPassCheckbox.stateChanged.connect(self.updateEnableSecondPass)
+		
+		layout.addRow(self.secondPassCheckbox)
+		
+		self.secondPassExtensions = QtWidgets.QLineEdit()
+		self.secondPassExtensions.setText(settings.get_option('pak/second_pass_extensions', '.wav'))
+		layout.addRow('Second pass extensions', self.secondPassExtensions)
+		
+		self.restrictSecondPassCheckbox = QtWidgets.QCheckBox(_('Restrict second pass to referenced character folders'))
+		self.restrictSecondPassCheckbox.setChecked(settings.get_option('pak/restrict_second_pass', False))
+		self.restrictSecondPassCheckbox.stateChanged.connect(self.updateRestrictSecondPassCheckbox)
+		
+		layout.addRow(self.restrictSecondPassCheckbox)
+		
+		
 		button = QtWidgets.QPushButton(_('Start process'))
 		button.clicked.connect(self.process)
 		layout.addRow(button)
 		
 		self.setLayout(layout)
+		
+	def updateEnableSecondPass(self):
+		settings.set_option('pak/enable_second_pass', self.secondPassCheckbox.isChecked())
+		
+	def updateRestrictSecondPassCheckbox(self):
+		settings.set_option('pak/restrict_second_pass', self.restrictSecondPassCheckbox.isChecked())
 		
 	def showInfos(self):
 		txt = '''Some clarifications for the "prepake PAK" tool
@@ -51,14 +78,33 @@ The purpose of the tool is to create a copy of your private dev chars folder tha
 
 
 
-So for example, the paths should be something like C:/project path/data/chars for workbase folder
-and C:/project path/release/data/chars for publish folder
+So for example, the paths should be something like "C:/project path/data/chars" for workbase folder
+and "C:/project path/release/data/chars" for publish folder
 
 It won't work if you use the same folders as one serves as the basis of the other.
 
 Also, note that it's not the data path that must but set, but data/chars
 
-For now this tool only works on chars folder.'''
+For now this tool only works on chars folder.
+
+This tool has two passes :
+
+- The first pass scans for sprites, palettes, wav, ... that are explicitly referenced in character models (txt)
+- The second pass scans for files with a specific format everywhere in chars folder (and subfolders), even if they are not explicitly referenced in character models. For example it can be used to include "wav" that are not explicitly referenced in characters models (because they are used with scripts).
+
+If you don't want the second pass to proceed, uncheck the corresponding checkbox.
+
+Alternatively, there is an option to make the second pass look only in referenced character folders. To make the difference clear, let's say :
+- you set up second pass to look for files with extensions ".wav"
+- you have two characters folders "Joe" and "Joe (copy)". 
+- only "Joe" is referenced in "models.txt"
+- if second pass is disabled, only "wav" files that are explicitly referenced in "Joe" model will be copied (this is done in the first pass). It's those wav files that a referenced with "hitfx", "sound", and so on.
+- if second pass is enabled, all "wav" files that are present in "Joe" and in "Joe (copy)" will be copied.
+- if second pass is enabled, and if "Restrict second pass to referenced character folders" is checked, all "wav" files that are present in "Joe" will be copied, but NOT those that are in "Joe (copy)". 
+
+
+
+'''
 		
 		dialog = QtWidgets.QDialog(self, QtCore.Qt.Window)
 		dialog.setWindowTitle("Prepare PAK infos")
@@ -72,6 +118,23 @@ For now this tool only works on chars folder.'''
 		dialog.exec()
 		
 	def process(self):
+		
+		others_raw = self.secondPassExtensions.text()
+		settings.set_option('pak/second_pass_extensions', others_raw)
+		others_raw = others_raw.replace(',', ' ')
+		others_raw = others_raw.replace(';', ' ')
+		
+		others_raw = others_raw.split(' ')
+		OTHERS = []
+		for other in others_raw:
+			if other != '':
+				if other[0] != '.':
+					other = '.' + other
+				OTHERS.append(other)
+		
+		# QtWidgets.QMessageBox.information(self, 'TMP', str(OTHERS))
+		
+		
 		dataPath = settings.get_option('general/data_path', '')
 		dig = True
 		files = []
@@ -90,6 +153,7 @@ For now this tool only works on chars folder.'''
 
 		modelFiles = []
 		spriteFiles = []
+		modelFolders = [] # for restricted second pass
 
 		f = open(os.path.join(dataPath, 'models.txt'), 'r')
 		data = f.readlines()
@@ -99,7 +163,11 @@ For now this tool only works on chars folder.'''
 			m = p.search(line)
 			if m:
 				modelFiles.append(m.group(2) + '.txt')
-
+				modelFolder =  os.path.dirname(baseFolder + os.sep +  m.group(2))
+				# QtWidgets.QMessageBox.information(self, _('Warning'),modelFolder)
+				modelFolders.append(modelFolder)
+				# return
+		# return
 		#print modelFiles
 
 		#modelFiles = [modelFiles[0],]
@@ -110,7 +178,9 @@ For now this tool only works on chars folder.'''
 		p = re.compile('^[^#](.*)data/chars/([^/]*)([^.]*)(.*)')
 		#p2 = re.compile('^[^#](.*)data\\chars\\([^.]*)(.*)')
 		for modelFile in modelFiles:
-			f = open(baseFolder + os.sep + modelFile, 'r') # 'r'
+			modelPath = baseFolder + os.sep + modelFile
+			if(not os.path.exists(modelPath)): continue
+			f = open(modelPath, 'r') # 'r'
 			
 			data = f.readlines()
 
@@ -191,19 +261,51 @@ For now this tool only works on chars folder.'''
 		#print scanFolder(baseFolder, dig, files)
 
 
-		for f in scanFolder(baseFolder, dig, files):
-			srcfile = f[len(baseFolder)+1:]
+		if(self.secondPassCheckbox.isChecked()):
+			if(self.restrictSecondPassCheckbox.isChecked()):
+				# for modelFolder in ['/home/piccolo/workspace/OpenBOR/data/chars/abubo']:
+				for modelFolder in modelFolders:
+					if not os.path.exists(modelFolder): continue
+					for f in scanFolder(modelFolder, False, files):
+						
+						
+						srcfileIndex = f.index('data/chars/') + len('data/chars/')
 
-			dstdir =  os.path.join(dstroot, os.path.dirname(srcfile))
-			try:
-				os.makedirs(dstdir)
-			except OSError:
-				pass
-			try:	
-				shutil.copy(baseFolder + os.sep + srcfile, dstdir)
-				#size += os.path.getsize(f)
-			except:
-				pass
+						# srcfile = f[len(modelFolder):]
+						srcfile = f[srcfileIndex:]
+						# srcfile = f.replace(modelFolder, '')
+
+						dstdir =  os.path.join(dstroot, os.path.dirname(srcfile))
+						
+						# print('OLEA', 'model:', modelFolder, 'f:', f, 'src:', srcfile, 'dst',dstdir)
+						# continue
+						
+						try:
+							os.makedirs(dstdir)
+						except OSError:
+							pass
+						try:	
+							# shutil.copy(modelFolder + os.sep + srcfile, dstdir)
+							shutil.copy(f, dstdir)
+							#size += os.path.getsize(f)
+						except:
+							pass
+				
+			else:
+			
+				for f in scanFolder(baseFolder, dig, files):
+					srcfile = f[len(baseFolder)+1:]
+
+					dstdir =  os.path.join(dstroot, os.path.dirname(srcfile))
+					try:
+						os.makedirs(dstdir)
+					except OSError:
+						pass
+					try:	
+						shutil.copy(baseFolder + os.sep + srcfile, dstdir)
+						#size += os.path.getsize(f)
+					except:
+						pass
 
 		print('Preparation finished')
 		QtWidgets.QMessageBox.information(self, _('Done'), _('Preparation done'))

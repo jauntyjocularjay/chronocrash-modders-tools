@@ -129,7 +129,6 @@ class Syntax:
     def isCode(self, lineData, column):
         """Check if text at given position is a code
         """
-        print(self._getTextType(lineData, column))
         return self._getTextType(lineData, column) ==  ' '
 
     def isComment(self, lineData, column):
@@ -168,53 +167,62 @@ class SyntaxManager:
                 {re.compile(fnmatch.translate(glob)): xmlFileName \
                         for glob, xmlFileName in globToXmlFileName.items()}
 
-    def _getSyntaxByXmlFileName(self, xmlFileName, formatConverterFunction):
+    def _getSyntaxByXmlFileName(self, xmlFileName):
         """Get syntax by its xml file name
         """
-        # print("getSyntaxByXmlFileName")
         import qutepart.syntax.loader  # delayed import for avoid cross-imports problem
 
         with self._loadedSyntaxesLock:
-            # print("getSyntaxByXmlFileName check", xmlFileName in self._loadedSyntaxes)
             if not xmlFileName in self._loadedSyntaxes:
                 xmlFilePath = os.path.join(os.path.dirname(__file__), "data", "xml", xmlFileName)
                 syntax = Syntax(self)
                 self._loadedSyntaxes[xmlFileName] = syntax
-                qutepart.syntax.loader.loadSyntax(syntax, xmlFilePath, formatConverterFunction)
+                qutepart.syntax.loader.loadSyntax(syntax, xmlFilePath)
 
             return self._loadedSyntaxes[xmlFileName]
 
-    def _getSyntaxByLanguageName(self, syntaxName, formatConverterFunction):
+    def _getSyntaxByLanguageName(self, syntaxName):
         """Get syntax by its name. Name is defined in the xml file
         """
-        xmlFileName = self._syntaxNameToXmlFileName[syntaxName]
-        return self._getSyntaxByXmlFileName(xmlFileName, formatConverterFunction)
+        try:
+            xmlFileName = self._syntaxNameToXmlFileName[syntaxName]
+            return self._getSyntaxByXmlFileName(xmlFileName)
+        except:
+          if(syntaxName == 'JavaScript React (JSX)/PHP'): syntaxName = 'javascript-react-php'
+          elif(syntaxName == 'Mustache/Handlebars (HTML)/PHP'): syntaxName = 'mustache-php'
+          else : syntaxName = syntaxName.replace('/', '-')
+          
+          return self._getSyntaxByXmlFileName(syntaxName.lower() + '.xml') # 2025_Version, heuristic fallback for files that are not referenced (like the new "Comments")
 
-    def _getSyntaxBySourceFileName(self, name, formatConverterFunction):
+    def _getSyntaxBySourceFileName(self, name):
         """Get syntax by source name of file, which is going to be highlighted
         """
         for regExp, xmlFileName in self._extensionToXmlFileName.items():
             if regExp.match(name):
-                return self._getSyntaxByXmlFileName(xmlFileName, formatConverterFunction)
+                return self._getSyntaxByXmlFileName(xmlFileName)
         else:
-            raise KeyError("No syntax for " + name)
+            try:
+                return self._getSyntaxByXmlFileName(syntaxName.lower() + '.xml') # 2025_Version NOTE : probably should make another try. NOTE : the above check uses data/syntax_db.json, which may not be up to date, which is why I use this as an heuristic fallback
+                # raise KeyError("No syntax for " + name)
+            except:
+                pass
 
-    def _getSyntaxByMimeType(self, mimeType, formatConverterFunction):
+    def _getSyntaxByMimeType(self, mimeType):
         """Get syntax by first line of the file
         """
         xmlFileName = self._mimeTypeToXmlFileName[mimeType]
-        return self._getSyntaxByXmlFileName(xmlFileName, formatConverterFunction)
+        return self._getSyntaxByXmlFileName(xmlFileName)
 
-    def _getSyntaxByFirstLine(self, firstLine, formatConverterFunction):
+    def _getSyntaxByFirstLine(self, firstLine):
         """Get syntax by first line of the file
         """
         for pattern, xmlFileName in self._firstLineToXmlFileName.items():
             if fnmatch.fnmatch(firstLine, pattern):
-                return self._getSyntaxByXmlFileName(xmlFileName, formatConverterFunction)
+                return self._getSyntaxByXmlFileName(xmlFileName)
         else:
             raise KeyError("No syntax for " + firstLine)
 
-    def getSyntax(self, formatConverterFunction = None,
+    def getSyntax(self,
                   xmlFileName=None,
                   mimeType=None,
                   languageName=None,
@@ -227,37 +235,38 @@ class SyntaxManager:
             * sourceFilePath
         First parameter in the list has biggest priority
         """
-        print('GET SYNTAX')
         syntax = None
+        
+        # print('getSyntax', xmlFileName, mimeType, languageName, sourceFilePath, firstLine);
 
         if syntax is None and xmlFileName is not None:
             try:
-                syntax = self._getSyntaxByXmlFileName(xmlFileName, formatConverterFunction)
+                syntax = self._getSyntaxByXmlFileName(xmlFileName)
             except KeyError:
                 _logger.warning('No xml definition %s' % xmlFileName)
 
         if syntax is None and mimeType is not None:
             try:
-                syntax = self._getSyntaxByMimeType(mimeType, formatConverterFunction)
+                syntax = self._getSyntaxByMimeType(mimeType)
             except KeyError:
                 _logger.warning('No syntax for mime type %s' % mimeType)
 
         if syntax is None and languageName is not None:
             try:
-                syntax = self._getSyntaxByLanguageName(languageName, formatConverterFunction)
+                syntax = self._getSyntaxByLanguageName(languageName)
             except KeyError:
                 _logger.warning('No syntax for language %s' % languageName)
 
         if syntax is None and sourceFilePath is not None:
             baseName = os.path.basename(sourceFilePath)
             try:
-                syntax = self._getSyntaxBySourceFileName(baseName, formatConverterFunction)
+                syntax = self._getSyntaxBySourceFileName(baseName)
             except KeyError:
                 pass
 
         if syntax is None and firstLine is not None:
             try:
-                syntax = self._getSyntaxByFirstLine(firstLine, formatConverterFunction)
+                syntax = self._getSyntaxByFirstLine(firstLine)
             except KeyError:
                 pass
 

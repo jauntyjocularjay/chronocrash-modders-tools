@@ -1,0 +1,266 @@
+--- cParser.c.pep623	2022-08-10 19:15:37.000000000 +0900
++++ cParser.c	2023-07-07 17:24:19.578531671 +0900
+@@ -213,7 +213,7 @@ typedef struct {
+     /* Type-specific fields go here. */
+     PyObject* parentContext;
+     PyObject* format;
+-    Py_UNICODE textType;
++    Py_UCS4 textType;
+     PyObject* attribute;
+     ContextSwitcher* context;
+     bool lookAhead;
+@@ -254,8 +254,8 @@ typedef struct {
+     PyObject* wholeLineUnicodeTextLower;
+     PyObject* wholeLineUtf8Text;
+     PyObject* wholeLineUtf8TextLower;
+-    Py_UNICODE* unicodeText;
+-    Py_UNICODE* unicodeTextLower;
++    Py_UCS4* unicodeText;
++    Py_UCS4* unicodeTextLower;
+     const char* utf8Text;
+     const char* utf8TextLower;
+     size_t textLen;
+@@ -290,7 +290,7 @@ typedef struct {
+     AbstractRule** rulesC;
+     size_t rulesSize;
+     bool dynamic;
+-    Py_UNICODE textType;
++    Py_UCS4 textType;
+     PyObject* textTypePython;
+ } Context;
+ 
+@@ -396,12 +396,12 @@ _listToDynamicallyAllocatedArray(PyObjec
+  *                                DeliminatorSet
+  ********************************************************************************/
+ static bool
+-_isDeliminatorNoCache(Py_UNICODE character, PyObject* setAsUnicodeString)
++_isDeliminatorNoCache(Py_UCS4 character, PyObject* setAsUnicodeString)
+ {
+-    Py_ssize_t deliminatorSetLen = PyUnicode_GET_SIZE(setAsUnicodeString);
++    Py_ssize_t deliminatorSetLen = PyUnicode_GET_LENGTH(setAsUnicodeString);
+     Py_ssize_t i;
+ 
+-    Py_UNICODE* deliminatorSetUnicode = PyUnicode_AS_UNICODE(setAsUnicodeString);
++    Py_UCS4* deliminatorSetUnicode = PyUnicode_AsUCS4Copy(setAsUnicodeString);
+ 
+     for(i = 0; i < deliminatorSetLen; i++)
+         if (deliminatorSetUnicode[i] == character)
+@@ -411,7 +411,7 @@ _isDeliminatorNoCache(Py_UNICODE charact
+ }
+ 
+ static bool
+-_isDeliminator(Py_UNICODE character, DeliminatorSet* deliminatorSet)
++_isDeliminator(Py_UCS4 character, DeliminatorSet* deliminatorSet)
+ {
+     if (character < DELIMINATOR_SET_CACHE_SIZE)
+         return deliminatorSet->cache[character];
+@@ -489,7 +489,7 @@ AbstractRuleParams_init(AbstractRulePara
+     ASSIGN_PYOBJECT_FIELD(format);
+ 
+     if (Py_None != textType)
+-        self->textType = PyUnicode_AsUnicode(textType)[0];
++        self->textType = PyUnicode_AsUCS4Copy(textType)[0];
+     else
+         self->textType = 0;
+ 
+@@ -575,7 +575,7 @@ TextToMatchObject_internal_make(unsigned
+ {
+     TextToMatchObject_internal textToMatchObject;
+ 
+-    textToMatchObject.wholeLineLen = PyUnicode_GET_SIZE(unicodeText);
++    textToMatchObject.wholeLineLen = PyUnicode_GET_LENGTH(unicodeText);
+     textToMatchObject.currentColumnIndex = column;
+     textToMatchObject.wholeLineUnicodeText = unicodeText;
+     textToMatchObject.wholeLineUnicodeTextLower = PyObject_CallMethod(unicodeText, "lower", "");
+@@ -611,8 +611,8 @@ TextToMatchObject_internal_update(TextTo
+     unsigned int i;
+     unsigned int prevTextLen;
+     unsigned int step;
+-    Py_UNICODE* wholeLineUnicodeBuffer = PyUnicode_AS_UNICODE(self->wholeLineUnicodeText);
+-    Py_UNICODE* wholeLineUnicodeBufferLower = PyUnicode_AS_UNICODE(self->wholeLineUnicodeTextLower);
++    Py_UCS4* wholeLineUnicodeBuffer = PyUnicode_AsUCS4Copy(self->wholeLineUnicodeText);
++    Py_UCS4* wholeLineUnicodeBufferLower = PyUnicode_AsUCS4Copy(self->wholeLineUnicodeTextLower);
+ 
+    // update text, textLen, column
+     self->unicodeText = wholeLineUnicodeBuffer + currentColumnIndex;
+@@ -632,7 +632,7 @@ TextToMatchObject_internal_update(TextTo
+ 
+     if (currentColumnIndex > 0)
+     {
+-        Py_UNICODE prevChar = wholeLineUnicodeBuffer[currentColumnIndex - 1];
++        Py_UCS4 prevChar = wholeLineUnicodeBuffer[currentColumnIndex - 1];
+         bool previousCharIsSpace = Py_UNICODE_ISSPACE(prevChar);
+ 
+         // update firstNonSpace
+@@ -1083,8 +1083,8 @@ DECLARE_RULE_METHODS_AND_TYPE(DetectChar
+ typedef struct {
+     AbstractRule_HEAD
+     /* Type-specific fields go here. */
+-    Py_UNICODE char_;
+-    Py_UNICODE char1_;
++    Py_UCS4 char_;
++    Py_UCS4 char1_;
+ } Detect2Chars;
+ 
+ 
+@@ -1112,7 +1112,7 @@ Detect2Chars_init(Detect2Chars *self, Py
+ {
+     PyObject* abstractRuleParams = NULL;
+     PyObject* string = NULL;
+-    Py_UNICODE* unicode;
++    Py_UCS4* unicode;
+ 
+     self->_tryMatch = Detect2Chars_tryMatch;
+ 
+@@ -1124,7 +1124,7 @@ Detect2Chars_init(Detect2Chars *self, Py
+ 
+     UNICODE_CHECK(string, -1);
+ 
+-    unicode = PyUnicode_AS_UNICODE(string);
++    unicode = PyUnicode_AsUCS4Copy(string);
+     self->char_ = unicode[0];
+     self->char1_ = unicode[1];
+ 
+@@ -1154,9 +1154,9 @@ static RuleTryMatchResult_internal
+ AnyChar_tryMatch(AnyChar* self, TextToMatchObject_internal* textToMatchObject)
+ {
+     Py_ssize_t i;
+-    Py_ssize_t size = PyUnicode_GET_SIZE(self->string);
+-    Py_UNICODE* unicode = PyUnicode_AS_UNICODE(self->string);
+-    Py_UNICODE char_ = textToMatchObject->unicodeText[0];
++    Py_ssize_t size = PyUnicode_GET_LENGTH(self->string);
++    Py_UCS4* unicode = PyUnicode_AsUCS4Copy(self->string);
++    Py_UCS4 char_ = textToMatchObject->unicodeText[0];
+ 
+     for (i = 0; i < size; i++)
+     {
+@@ -1673,7 +1673,7 @@ RegExpr_tryMatch(RegExpr* self, TextToMa
+     if (unicodeText == NULL) {
+         return MakeEmptyTryMatchResult();
+     }
+-    matchLen = PyUnicode_GET_SIZE(unicodeText);
++    matchLen = PyUnicode_GET_LENGTH(unicodeText);
+     Py_DECREF(unicodeText);
+ 
+     if (matchLen != 0) {
+@@ -1736,7 +1736,7 @@ DECLARE_RULE_METHODS_AND_TYPE(RegExpr);
+ /********************************************************************************
+  *                                Int
+  ********************************************************************************/
+-size_t AbstractNumberRule_countDigits(Py_UNICODE* text, size_t textLen)
++size_t AbstractNumberRule_countDigits(Py_UCS4* text, size_t textLen)
+ {
+     size_t i;
+ 
+@@ -1852,7 +1852,7 @@ AbstractNumberRule_tryMatch(AbstractRule
+         return MakeEmptyTryMatchResult();
+ 
+     matchEndIndex = textToMatchObject->currentColumnIndex + index;
+-    if (matchEndIndex < PyUnicode_GET_SIZE(textToMatchObject->wholeLineUnicodeText))
++    if (matchEndIndex < PyUnicode_GET_LENGTH(textToMatchObject->wholeLineUnicodeText))
+     {
+         size_t i;
+         bool haveMatch = false;
+@@ -2000,7 +2000,7 @@ HlCOct_dealloc_fields(HlCOct* self)
+ }
+ 
+ static bool
+-_isOctChar(Py_UNICODE symbol)
++_isOctChar(Py_UCS4 symbol)
+ {
+     return (symbol >= '0' && symbol <= '7');
+ }
+@@ -2062,7 +2062,7 @@ HlCHex_dealloc_fields(HlCHex* self)
+ }
+ 
+ static bool
+-_isHexChar(Py_UNICODE symbol)
++_isHexChar(Py_UCS4 symbol)
+ {
+     return (symbol >= '0' && symbol <= '9') ||
+            (symbol >= 'a' && symbol <= 'f');
+@@ -2119,7 +2119,7 @@ DECLARE_RULE_METHODS_AND_TYPE(HlCHex);
+  ********************************************************************************/
+ 
+ static bool
+-_charInString(Py_UNICODE character, const char* string)
++_charInString(Py_UCS4 character, const char* string)
+ {
+     char charToSearch = (char)character;
+ 
+@@ -2130,7 +2130,7 @@ _charInString(Py_UNICODE character, cons
+ }
+ 
+ static int
+-_checkEscapedChar(Py_UNICODE* textLower, size_t textLen)
++_checkEscapedChar(Py_UCS4* textLower, size_t textLen)
+ {
+     size_t index = 0;
+     if (textLen > 1 && textLower[0] == '\\')
+@@ -2270,8 +2270,8 @@ DECLARE_RULE_METHODS_AND_TYPE(HlCChar);
+ typedef struct {
+     AbstractRule_HEAD
+     /* Type-specific fields go here. */
+-    Py_UNICODE char_;
+-    Py_UNICODE char1_;
++    Py_UCS4 char_;
++    Py_UCS4 char1_;
+ } RangeDetect;
+ 
+ 
+@@ -2320,8 +2320,8 @@ RangeDetect_init(RangeDetect *self, PyOb
+     UNICODE_CHECK(char1_, -1);
+ 
+     ASSIGN_FIELD(AbstractRuleParams, abstractRuleParams);
+-    self->char_ = PyUnicode_AS_UNICODE(char_)[0];
+-    self->char1_ = PyUnicode_AS_UNICODE(char1_)[0];
++    self->char_ = PyUnicode_AsUCS4Copy(char_)[0];
++    self->char1_ = PyUnicode_AsUCS4Copy(char1_)[0];
+ 
+     return 0;
+ }
+@@ -2740,7 +2740,7 @@ Context_setValues(Context *self, PyObjec
+     ASSIGN_FIELD(ContextSwitcher, fallthroughContext);
+     ASSIGN_BOOL_FIELD(dynamic);
+     ASSIGN_PYOBJECT_FIELD(textTypePython);
+-    self->textType = PyUnicode_AsUnicode(textTypePython)[0];
++    self->textType = PyUnicode_AsUCS4Copy(textTypePython)[0];
+ 
+     Py_RETURN_NONE;
+ }
+@@ -2782,7 +2782,7 @@ Context_appendSegment(PyObject* segmentL
+ }
+ 
+ static void
+-Context_appendTextType(size_t fromIndex, size_t count, PyObject* textTypeMap, Py_UNICODE textType)
++Context_appendTextType(size_t fromIndex, size_t count, PyObject* textTypeMap, Py_UCS4 textType)
+ {
+     size_t i;
+     for (i = fromIndex; i < fromIndex + count; i++)
+@@ -2808,7 +2808,7 @@ Context_parseBlock(Context* self,
+                                                     unicodeText,
+                                                     ContextStack_currentData(*pContextStack));
+ 
+-    wholeLineLen = PyUnicode_GET_SIZE(textToMatchObject.wholeLineUnicodeText);
++    wholeLineLen = PyUnicode_GET_LENGTH(textToMatchObject.wholeLineUnicodeText);
+ 
+     *pLineContinue = false;
+ 
+@@ -2849,7 +2849,7 @@ Context_parseBlock(Context* self,
+             if (NULL != result.rule)  // if something matched
+             {
+                 PyObject* format;
+-                Py_UNICODE textType;
++                Py_UCS4 textType;
+                 *pLineContinue = result.lineContinue;
+ 
+                 if (parentParser->debugOutputEnabled)
+@@ -3088,7 +3088,7 @@ Parser_parseBlock_internal(Parser *self,
+         Py_INCREF(Py_None);
+     }
+ 
+-    textLen = PyUnicode_GET_SIZE(unicodeText);
++    textLen = PyUnicode_GET_LENGTH(unicodeText);
+     textTypeMap = PyUnicode_New(textLen, 65535);
+     if (textLen > 0)
+         PyUnicode_Fill(textTypeMap, 0, textLen, ' ');

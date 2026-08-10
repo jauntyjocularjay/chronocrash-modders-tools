@@ -10,6 +10,13 @@ from data import AttackBox, BBox, BindData
 from gui.level.items import Entity
 
 
+def sanitize(txt):
+
+
+	my_new_string = re.sub('[^a-zA-Z0-9 \n\.]', '', txt)
+	return my_new_string
+
+
 class AbstractOverlayEditor(QtWidgets.QWidget):
 	
 	SETTING_KEY = 'opponent'
@@ -21,6 +28,8 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 		self.layout = QtWidgets.QVBoxLayout()
 		self.layout.setContentsMargins(0, 0, 0, 0)
 		self.setLayout(self.layout)
+		
+		self.mainEditor = self.parent.parent
 		
 		self.widgets = {}
 		
@@ -47,7 +56,7 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 		
 		self.entityAnimation = QtWidgets.QComboBox() # get option
 		self.entityAnimation.setEditable(True)
-		self.entityAnimation.setCurrentText(settings.get_option('entity/last_' + self.SETTING_KEY + '_animation', 'idle'))
+		self.entityAnimation.setCurrentText(settings.get_option('entity/last_' + self.SETTING_KEY + '_animation_' + sanitize( self.mainEditor.currentProject['name']), 'idle'))
 		self.entityAnimation.currentTextChanged.connect(self.entityAnimationChanged)
 		self.entityAnimation.setObjectName("entityAnimCB")
 		layout.addWidget(self.entityAnimation, 4, 0)
@@ -105,6 +114,7 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 		
 		
 	def entityModelEntryChanged(self, widget):
+		if(self.parent.parent.clearingCache): return # mainEditor
 		print("entity model entry changed", self.entityModelEntry.currentText())
 		if (self.changeEntityModel()):
 			if (self.loadingModels):
@@ -129,6 +139,7 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 				self.reloadPalettes()
 	
 	def entityAnimationChanged(self, widget):
+		if(self.parent.parent.clearingCache): return # mainEditor
 		print("entity animation changed", self.entityAnimation.currentText())
 		if self.loadingAnims : return
 		if self.changeEntityAnimation():
@@ -142,8 +153,9 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 			self.showOpponent.setChecked(True)
 			
 	def reloadModels(self):
+		print("\n\n\n\nRELOADING MODELS", Entity.AVAILABLE_MODELS)
 		self.loadingModels = True
-		lastModel = settings.get_option('entity/last_' + self.SETTING_KEY + '_model', '')
+		lastModel = settings.get_option('entity/last_' + self.SETTING_KEY + '_model_' + sanitize(self.mainEditor.currentProject['name']), '')
 		print('last Model', lastModel)
 		self.entityModelEntry.clear()
 		sortAlpha = settings.get_option('entity/binding_models_sort_alphabetical', False)
@@ -158,14 +170,14 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 	def reloadAnims(self, default=None):
 		print('reloading anims')
 		self.loadingAnims = True
-		if(default == None): default = settings.get_option('entity/last_' + self.SETTING_KEY + '_animation', '')
+		if(default == None): default = settings.get_option('entity/last_' + self.SETTING_KEY + '_animation_' + sanitize(self.mainEditor.currentProject['name']), '')
 		self.entityAnimation.clear()
 		
 		if(self.SETTING_KEY == 'opponent'):
 			opponent = self.parent.frameEditor.opponent
 		else:
 			opponent = self.parent.frameEditor.onionSkinEnt
-		if(opponent != None):
+		if(opponent != None and hasattr(opponent, 'anims')):
 			self.entityAnimation.addItems(opponent.anims.keys())
 		self.entityAnimation.setCurrentText(default)
 		
@@ -188,6 +200,8 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 		
 		
 	def changeEntityModel(self):
+		if(self.parent.parent.clearingCache): return False # mainEditor
+		
 		txt = self.entityModelEntry.currentText()
 		if(txt in Entity.AVAILABLE_MODELS and txt != self.loadedModel):
 			print("Loading opponent")
@@ -197,7 +211,8 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 				self.parent.frameEditor.opponentModel = txt
 			else:
 				self.parent.frameEditor.onionSkinModel = txt
-			settings.set_option('entity/last_' + self.SETTING_KEY + '_model', txt)
+			settings.set_option('entity/last_' + self.SETTING_KEY + '_model_' + sanitize(self.mainEditor.currentProject['name']), txt)
+			# self.mainEditor.core.notify('last_' + self.SETTING_KEY + '_model_' + self.mainEditor.currentProject['name'] + ' : ' + txt)
 			# self.entityModelEntry.setProperty("class", "valid")
 			# self.entityModelEntry.setObjectName("entityModelCB-valid")
 			self.setColorState(self.entityModelEntry, 'valid')
@@ -249,7 +264,7 @@ class AbstractOverlayEditor(QtWidgets.QWidget):
 			opponent.actualizeFrame()
 			print("Loading animation")
 			
-			settings.set_option('entity/last_' + self.SETTING_KEY + '_animation', txt)
+			settings.set_option('entity/last_' + self.SETTING_KEY + '_animation_' + sanitize(self.mainEditor.currentProject['name']), txt)
 			self.entityAnimation.setStyleSheet("QComboBox { background: rgb(0, 255, 0); selection-background-color: rgb(233, 99, 0); }");
 			
 			return True
@@ -341,7 +356,7 @@ class BindingEditor(AbstractOverlayEditor):
 		
 		
 		# Binding GB
-		self.bindingGB = CustomGroupBox(_('Binding settings'))
+		self.bindingGB = CustomGroupBox2(_('Binding settings'))
 		self.bindingGB.addClicked.connect(self.addBindData)
 		layout = QtWidgets.QGridLayout()
 		
@@ -593,9 +608,12 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		self.layout.setContentsMargins(0, 0, 0, 0)
 		self.setLayout(self.layout)
 		
-		offsetGB = QtWidgets.QGroupBox(_('Off set'))
+		offsetGB = QtWidgets.QGroupBox(_('Offset'))
 		layout = QtWidgets.QGridLayout()
 		offsetGB.setLayout(layout)
+		
+		self.collisionIndexBody = 0
+		self.collisionIndexAttack = 0
 		
 		
 		self.widgets = {}
@@ -603,6 +621,8 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		xOff = QtWidgets.QSpinBox()
 		yOff = QtWidgets.QSpinBox()
 		delay = QtWidgets.QSpinBox()
+		frame = QtWidgets.QLabel('-')
+		self.frameLabel = frame
 		
 		self.widgets['delay'] = delay
 		self.widgets['offset'] = {'x':xOff, 'y':yOff}
@@ -614,13 +634,17 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		layout.addWidget(QLabel(_("Delay")), 2, 0)
 		layout.addWidget(delay, 3, 0)
 		
+		layout.addWidget(QLabel(_("Frame	Ticks")), 2, 1)
+		layout.addWidget(frame, 3, 1)
+		
 		self.layout.addWidget(offsetGB, 0)
 		
 		
 		#self.bboxGB = QtWidgets.QGroupBox(_('Body Box'))
 		self.bboxGB = CustomGroupBox(_('Body Box'))
-		self.bboxGB.addClicked.connect(self.addBox)
-		self.bboxGB.deleteClicked.connect(self.deleteBox)
+		self.bboxGB.spinner.valueChanged.connect(self.bodyCollisionChanged)
+		self.bboxGB.groupBox.addClicked.connect(self.addBox)
+		self.bboxGB.groupBox.deleteClicked.connect(self.deleteBox)
 		layout = QtWidgets.QGridLayout()
 		self.bboxGB.setLayout(layout)
 		
@@ -656,8 +680,9 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		layout = QtWidgets.QGridLayout()
 		
 		self.attackGB.setLayout(layout)
-		self.attackGB.addClicked.connect(self.addBox)
-		self.attackGB.deleteClicked.connect(self.deleteBox)
+		self.attackGB.spinner.valueChanged.connect(self.attackCollisionChanged)
+		self.attackGB.groupBox.addClicked.connect(self.addBox)
+		self.attackGB.groupBox.deleteClicked.connect(self.deleteBox)
 		
 		x = QtWidgets.QSpinBox()
 		y = QtWidgets.QSpinBox()
@@ -701,7 +726,7 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		
 		
 		# ******     RANGE BOX       ********
-		self.rangeGB = CustomGroupBox(_('Range'))
+		self.rangeGB = CustomGroupBox2(_('Range'))
 		layout = QtWidgets.QGridLayout()
 		
 		self.rangeGB.setLayout(layout)
@@ -723,7 +748,7 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		
 		
 		# ******     RANGEZ BOX       ********
-		self.rangezGB = CustomGroupBox(_('Range Z'))
+		self.rangezGB = CustomGroupBox2(_('Range Z'))
 		layout = QtWidgets.QGridLayout()
 		
 		self.rangezGB.setLayout(layout)
@@ -766,6 +791,13 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		self.bboxGB.setDisabled(True)
 		self.attackGB.setDisabled(True)
 	
+	def attackCollisionChanged(self):
+		self.collisionIndexAttack = self.attackGB.spinner.value()
+		self.loadData()
+	
+	def bodyCollisionChanged(self):
+		self.collisionIndexBody = self.bboxGB.spinner.value()
+		self.loadData()
 	
 	def visualizeRangeZChanged(self):
 		settings.set_option('entity/visualize_rangez', self.showRangeZ.isChecked())
@@ -773,12 +805,15 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		
 	def addBox(self):
 		if len(self.parent.anim) == 0 : return
-		if self.sender() == self.attackGB:
+		if self.sender() == self.attackGB.groupBox:
 			data = self.parent.frames[self.parent.currentFrame]
-			data['attack'] = AttackBox()
-		elif self.sender() == self.bboxGB:
+			data['attack'][self.collisionIndexAttack] = AttackBox()
+			# self.parent.animCheckImplicitCollision('attack', self.collisionIndexAttack)
+		elif self.sender() == self.bboxGB.groupBox:
+			print('adding bbox')
 			data = self.parent.frames[self.parent.currentFrame]
-			data['bbox'] = BBox()
+			data['bbox'][self.collisionIndexBody] = BBox()
+			# self.parent.animCheckImplicitCollision('bbox', self.collisionIndexBody)
 		elif self.sender() == self.rangeGB:
 			data = self.parent.frames[0]
 			data['range'] = (-10, 100)
@@ -791,12 +826,12 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		
 	def deleteBox(self):
 		if len(self.parent.anim) == 0 : return
-		if self.sender() == self.attackGB:
+		if self.sender() == self.attackGB.groupBox:
 			data = self.parent.frames[self.parent.currentFrame]
-			data['attack'].delete = True
-		elif self.sender() == self.bboxGB:
+			data['attack'][self.collisionIndexAttack].delete = True
+		elif self.sender() == self.bboxGB.groupBox:
 			data = self.parent.frames[self.parent.currentFrame]
-			data['bbox'].delete = True
+			data['bbox'][self.collisionIndexBody].delete = True
 		elif self.sender() == self.rangeGB:
 			data = self.parent.frames[0]
 			data['deleteRange'] = True
@@ -808,13 +843,38 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		self.parent.frameEditor.loadFrame()
 		
 		
-	def loadData(self, data, anim):
+	def loadData(self, data=None, anim=None):
+		
+		if(data == None):
+			data = self.data
+			anim = self.anim
+		else:
+			self.data = data
+			self.anim = anim
+			
+		i = 0
+		ticks = 0
+		prevDelay = 0
+		while(anim.frames[i]['index'] != data['index']):
+			if('delay' in anim.frames[i]):
+				prevDelay = anim.frames[i]['delay']
+			ticks += prevDelay
+			i+=1
+			
+		
+			
+		
 		
 		self.loading = True
 		delay = 0
 		if 'delay' in data:
 			delay = data['delay']
+			ticks += delay
+		else:
+			ticks += prevDelay
 		self.widgets['delay'].setValue(delay)
+		
+		self.frameLabel.setText(str(i) + '/' + str(len(anim.frames)-1) + '	' + str(ticks))
 		
 		
 		x, y = 0, 0
@@ -825,9 +885,9 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 		self.widgets['offset']['y'].setValue(y)
 		
 		
-		if 'bbox' in data:
+		if self.collisionIndexBody in data['bbox']:
 			self.bboxGB.setDisabled(False)
-			params = data['bbox'].getParams()
+			params = data['bbox'][self.collisionIndexBody].getParams()
 			x, y, w, h = params[0:4]
 			self.widgets['bbox']['x'].setValue(x)
 			self.widgets['bbox']['y'].setValue(y)
@@ -835,17 +895,19 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 			self.widgets['bbox']['h'].setValue(h)
 			
 			try: self.widgets['bbox']['z1'].setValue(params[4])
-			except: pass
+			except: self.widgets['bbox']['z1'].setValue(-100000)
 			
 			try: self.widgets['bbox']['z2'].setValue(params[5])
-			except: pass
+			except: self.widgets['bbox']['z2'].setValue(-100000)
 		else:
 			self.bboxGB.setDisabled(True)
 			
-			
-		if 'attack' in data:
+
+		
+		
+		if self.collisionIndexAttack in data['attack']:
 			self.attackGB.setDisabled(False)
-			abox = data['attack']
+			abox = data['attack'][self.collisionIndexAttack]
 
 			aType, x, y, w, h, d, pow, block, noflash, pausetime, z1 =  abox.getParams()[0:11]
 			
@@ -898,7 +960,7 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 	def updateData(self, data=None):
 		
 		def updateNotEmpty(box, key, value):
-			#print("HERE", key, value)
+			print("HERE", key, value)
 			if value == 0 and (box.phantom or box.data[key] == None):
 				return
 			
@@ -932,8 +994,8 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 			
 			data['offset'] = [x, y]
 			
-		if 'bbox' in data:
-			bbox = data['bbox']
+		if self.collisionIndexBody in data['bbox']:
+			bbox = data['bbox'][self.collisionIndexBody]
 			x, y, w, h = bbox.getParams()[0:4]
 			x = self.widgets['bbox']['x'].value()
 			y = self.widgets['bbox']['y'].value()
@@ -945,11 +1007,18 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 			bbox.y = y
 			bbox.width = w
 			bbox.height = h
-			bbox.z1 = z1
-			bbox.z2 = z2
-			
-		if 'attack' in data:
-			abox = data['attack']
+			if(z1 != -100000):
+				bbox.z1 = z1
+			if(z2 != -100000):
+				bbox.z2 = z2
+		
+		
+		
+		
+		if self.collisionIndexAttack in data['attack']:
+			print("JOSE", self.collisionIndexAttack, data['attack'][self.collisionIndexAttack].getText(True))
+			abox = data['attack'][self.collisionIndexAttack]
+		
 			
 			aType, x, y, w, h = abox.getParams()[0:5]
 			x = self.widgets['attack']['x'].value()
@@ -979,6 +1048,8 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 			updateNotEmpty(abox, 'effect.hit.flash.disable', noflash)
 			updateNotEmpty(abox, 'size.z.background', depth)
 			
+			print("JOSE2", y, self.collisionIndexAttack, abox.getText(True))
+			
 		
 		frame0 = self.parent.frames[0]
 		if 'range' in frame0:
@@ -1003,20 +1074,39 @@ class FramePropertiesEditor(QtWidgets.QWidget):
 			self.parent.rebuildText()
 			self.parent.frameEditor.loadFrame()
 		
-class ButtonGroupBox(QtWidgets.QWidget):
 
-    def __init__(self, parent=None):
-        super(ButtonGroupBox, self).__init__(parent=parent)
-
-        self.layout = QtWidgets.QVBoxLayout(self)
-        self.layout.setContentsMargins(0,24,0,0)
-        self.groupBox = QtWidgets.QGroupBox(self)
-        self.button = QtWidgets.QPushButton("FOO", parent=self)
-        self.layout.addWidget(self.groupBox)
-
-        self.button.move(0, -4)
         
-class CustomGroupBox(QtWidgets.QGroupBox):
+        
+class CustomGroupBox(QtWidgets.QWidget):
+	
+
+
+	def __init__(self, label, parent=None):
+		super(CustomGroupBox, self).__init__(parent=parent)
+		
+		self.groupBox = CustomGroupBox2(label)
+		self.spinner = QtWidgets.QSpinBox(parent=self)
+		
+		# self.spinner.setStyleSheet('QSpinBox { z-index: 999; background:green;}')
+
+		self.layout = QtWidgets.QVBoxLayout(self)
+		self.layout.setContentsMargins(0,24,0,0)
+	
+		# self.button = QtWidgets.QPushButton("FOO", parent=self)
+		self.layout.addWidget(self.groupBox)
+
+		self.spinner.move(120, 10)
+		self.groupBox.stackUnder(self.spinner)
+		
+	def setDisabled(self, disabled):
+		self.groupBox.setDisabled(disabled)
+		
+	def setLayout(self, layout):
+		self.groupBox.setLayout(layout)
+        
+	
+        
+class CustomGroupBox2(QtWidgets.QGroupBox):
 	
 	deleteClicked = QtCore.pyqtSignal()
 	addClicked = QtCore.pyqtSignal()
@@ -1024,6 +1114,9 @@ class CustomGroupBox(QtWidgets.QGroupBox):
 	
 	def __init__(self, label):
 		QtWidgets.QGroupBox.__init__(self, label)
+		
+		
+		
 		
 		self.disabled = False
 		
@@ -1060,7 +1153,7 @@ class CustomGroupBox(QtWidgets.QGroupBox):
 		rect = e.rect();
    
    
-   
+		
 		
 		QtWidgets.QGroupBox.paintEvent(self, e)
 		# if( self.painter != None): 
@@ -1098,3 +1191,5 @@ class CustomGroupBox(QtWidgets.QGroupBox):
 		# self.update() # cause leak
 		#label = QtWidgets.QLabel("Hello")
 		#label.render(painter)
+		
+		

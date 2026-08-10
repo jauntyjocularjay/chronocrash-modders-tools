@@ -2,10 +2,15 @@ from PyQt5 import QtWidgets, QtGui, QtCore
 
 from common import settings
 
+import platform
+
 class FontSelector(QtWidgets.QWidget):
-	def __init__(self):
+	def __init__(self, prefix='editor', defaultFamily=None, defaultSize=12):
 		QtWidgets.QWidget.__init__(self)
-		
+
+		self.prefix = prefix
+		self.setMinimumSize(500, 450)
+
 		db = QtGui.QFontDatabase()
 		families = db.families()
 
@@ -38,11 +43,17 @@ class FontSelector(QtWidgets.QWidget):
 		
 		
 		# Load settings
-		currentFamily = settings.get_option('editor/font_family', 'Courier')
+		if defaultFamily is None:
+			fontFamilies = {'Windows':'Courier New',
+	                        'Darwin': 'Menlo'}
+			defaultFamily = fontFamilies.get(platform.system(), 'Monospace')
+		currentFamily = settings.get_option(self.prefix + '/font_family', defaultFamily)
 		if currentFamily in families:
 			self.fontW.setCurrentRow(families.index(currentFamily))
-			
-		self.sizeW.setCurrentRow(fontSizes.index(settings.get_option('editor/font_size', 12)))
+
+		currentSize = settings.get_option(self.prefix + '/font_size', defaultSize)
+		if currentSize in fontSizes:
+			self.sizeW.setCurrentRow(fontSizes.index(currentSize))
 		
 	def changeFamily(self, family):
 		f = self.textEdit.font()
@@ -55,5 +66,7 @@ class FontSelector(QtWidgets.QWidget):
 		self.textEdit.setFont(f)
 		
 	def save(self):
-		settings.set_option('editor/font_family', self.fontW.currentItem().text())
-		settings.set_option('editor/font_size', int(self.sizeW.currentItem().text()))
+		if self.fontW.currentItem() is not None:
+			settings.set_option(self.prefix + '/font_family', self.fontW.currentItem().text())
+		if self.sizeW.currentItem() is not None:
+			settings.set_option(self.prefix + '/font_size', int(self.sizeW.currentItem().text()))

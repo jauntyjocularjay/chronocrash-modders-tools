@@ -46,6 +46,8 @@
 	</list>
 	
 	<list name="attacks">
+               
+                <item> {attack </item>
 		<item> attack </item>
 		<item> attack1 </item>
 		<item> attack2 </item>
@@ -69,8 +71,10 @@
     
     <list name="commands">
 <!--       <item> frame </item> -->
+      <item> collision </item>
       <item> offset </item>
       <item> delay </item>
+      <item> {bbox </item>
       <item> bbox </item>
       <item> sound </item>
     </list>
@@ -106,6 +110,7 @@
     <contexts>
       <context attribute="Normal Text" lineEndContext="#stay" name="Normal">
         <DetectSpaces />
+         <StringDetect attribute="Attack" context="Attack" String="#attack" firstNonSpace="false" />
 	<keyword attribute="Command" context="#stay" String="commands" name="Command"/>
         <Detect2Chars attribute="Comment 2" context="Hash comment 2" char="#" char1="#" />
 	<DetectChar attribute="Comment" char="#" context="Hash comment"/>
@@ -143,13 +148,15 @@
 <!--         <HlCChar attribute="Char" context="#stay"/> -->
 <!--         <DetectChar attribute="String" context="String" char="&quot;"/> -->
 <!--         <IncludeRules context="##Doxygen" /> -->
+        
         <Detect2Chars attribute="Comment" context="Commentar 2" char="/" char1="*" beginRegion="Comment"/>
 	<StringDetect attribute="Frame" context="Frame" String="frame " insensitive="true" firstNonSpace="true"/>
 	<StringDetect attribute="Keyword" context="Anim" String="anim\s" insensitive="true" firstNonSpace="true"/>
 	<keyword attribute="Keyword" context="Anim" String="boldKeys"/>
 	
 <!-- 	<StringDetect attribute="Attack" context="Attack" String="attack " insensitive="true" firstNonSpace="true"/> -->
-	<keyword attribute="Attack" context="Attack" String="attacks" firstNonSpace="true"/>
+	<keyword attribute="Attack" context="Attack" String="attacks" firstNonSpace="true" />
+       
 	
 	<StringDetect attribute="Script" context="Script" String="@script" insensitive="true"/>
 	<StringDetect attribute="@cmd" context="@cmd" String="@cmd" insensitive="true"/>
@@ -276,6 +283,6 @@
       <comment name="singleLine" start="#" />
       <comment name="multiLine" start="/*" end="*/" />
     </comments>
-    <keywords casesensitive="1" additionalDeliminator="'&quot;" />
+    <keywords casesensitive="1" additionalDeliminator="'&quot;"   weakDeliminator="{"/>
   </general>
 </language>

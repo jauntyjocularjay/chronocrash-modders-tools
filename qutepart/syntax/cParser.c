@@ -93,6 +93,15 @@
         Py_XDECREF(tmp); \
     }
 
+// Like ASSIGN_VALUE but "steals" the reference (doesn't INCREF)
+// Use this when 'from' is a newly created object with refcount 1
+#define ASSIGN_NEW_VALUE(type, to, from) \
+    { \
+        type* tmp = to; \
+        to = from; \
+        Py_XDECREF(tmp); \
+    }
+
 #define ASSIGN_PYOBJECT_VALUE(to, from) \
     ASSIGN_VALUE(PyObject, to, from)
 
@@ -213,7 +222,7 @@ typedef struct {
     /* Type-specific fields go here. */
     PyObject* parentContext;
     PyObject* format;
-    Py_UNICODE textType;
+    Py_UCS4 textType;
     PyObject* attribute;
     ContextSwitcher* context;
     bool lookAhead;
@@ -254,8 +263,10 @@ typedef struct {
     PyObject* wholeLineUnicodeTextLower;
     PyObject* wholeLineUtf8Text;
     PyObject* wholeLineUtf8TextLower;
-    Py_UNICODE* unicodeText;
-    Py_UNICODE* unicodeTextLower;
+    Py_UCS4* unicodeText;
+    Py_UCS4* unicodeTextLower;
+    Py_UCS4* unicodeTextBuffer;      // Base buffer to be freed
+    Py_UCS4* unicodeTextBufferLower; // Base buffer to be freed
     const char* utf8Text;
     const char* utf8TextLower;
     size_t textLen;
@@ -284,12 +295,13 @@ typedef struct {
     PyObject* format;
     PyObject* lineEndContext;
     PyObject* lineBeginContext;
+    PyObject* lineEmptyContext;
     ContextSwitcher* fallthroughContext;
     PyObject* rulesPython;
     AbstractRule** rulesC;
     size_t rulesSize;
     bool dynamic;
-    Py_UNICODE textType;
+    Py_UCS4 textType;
     PyObject* textTypePython;
 } Context;
 
@@ -395,22 +407,29 @@ _listToDynamicallyAllocatedArray(PyObject* list, size_t* size)
  *                                DeliminatorSet
  ********************************************************************************/
 static bool
-_isDeliminatorNoCache(Py_UNICODE character, PyObject* setAsUnicodeString)
+_isDeliminatorNoCache(Py_UCS4 character, PyObject* setAsUnicodeString)
 {
-    Py_ssize_t deliminatorSetLen = PyUnicode_GET_SIZE(setAsUnicodeString);
+    Py_ssize_t deliminatorSetLen = PyUnicode_GET_LENGTH(setAsUnicodeString);
     Py_ssize_t i;
+    bool result = false;
 
-    Py_UNICODE* deliminatorSetUnicode = PyUnicode_AS_UNICODE(setAsUnicodeString);
+    Py_UCS4* deliminatorSetUnicode = PyUnicode_AsUCS4Copy(setAsUnicodeString);
 
     for(i = 0; i < deliminatorSetLen; i++)
+    {
         if (deliminatorSetUnicode[i] == character)
-            return true;
+        {
+            result = true;
+            break;
+        }
+    }
 
-    return false;
+    PyMem_Free(deliminatorSetUnicode);
+    return result;
 }
 
 static bool
-_isDeliminator(Py_UNICODE character, DeliminatorSet* deliminatorSet)
+_isDeliminator(Py_UCS4 character, DeliminatorSet* deliminatorSet)
 {
     if (character < DELIMINATOR_SET_CACHE_SIZE)
         return deliminatorSet->cache[character];
@@ -488,7 +507,11 @@ AbstractRuleParams_init(AbstractRuleParams *self, PyObject *args, PyObject *kwds
     ASSIGN_PYOBJECT_FIELD(format);
 
     if (Py_None != textType)
-        self->textType = PyUnicode_AsUnicode(textType)[0];
+    {
+        Py_UCS4* textTypeBuffer = PyUnicode_AsUCS4Copy(textType);
+        self->textType = textTypeBuffer[0];
+        PyMem_Free(textTypeBuffer);
+    }
     else
         self->textType = 0;
 
@@ -574,7 +597,7 @@ TextToMatchObject_internal_make(unsigned int column, PyObject* unicodeText, _Reg
 {
     TextToMatchObject_internal textToMatchObject;
 
-    textToMatchObject.wholeLineLen = PyUnicode_GET_SIZE(unicodeText);
+    textToMatchObject.wholeLineLen = PyUnicode_GET_LENGTH(unicodeText);
     textToMatchObject.currentColumnIndex = column;
     textToMatchObject.wholeLineUnicodeText = unicodeText;
     textToMatchObject.wholeLineUnicodeTextLower = PyObject_CallMethod(unicodeText, "lower", "");
@@ -591,6 +614,10 @@ TextToMatchObject_internal_make(unsigned int column, PyObject* unicodeText, _Reg
     textToMatchObject.isWordStart = true;
     textToMatchObject.contextData = contextData;
 
+    // Initialize buffer pointers to NULL (will be allocated in _update)
+    textToMatchObject.unicodeTextBuffer = NULL;
+    textToMatchObject.unicodeTextBufferLower = NULL;
+
     return textToMatchObject;
 }
 
@@ -600,6 +627,12 @@ TextToMatchObject_internal_free(TextToMatchObject_internal* self)
     Py_XDECREF(self->wholeLineUnicodeTextLower);
     Py_XDECREF(self->wholeLineUtf8Text);
     Py_XDECREF(self->wholeLineUtf8TextLower);
+
+    // Free the unicode buffers allocated by PyUnicode_AsUCS4Copy
+    if (self->unicodeTextBuffer != NULL)
+        PyMem_Free(self->unicodeTextBuffer);
+    if (self->unicodeTextBufferLower != NULL)
+        PyMem_Free(self->unicodeTextBufferLower);
 }
 
 static void
@@ -610,12 +643,20 @@ TextToMatchObject_internal_update(TextToMatchObject_internal* self,
     unsigned int i;
     unsigned int prevTextLen;
     unsigned int step;
-    Py_UNICODE* wholeLineUnicodeBuffer = PyUnicode_AS_UNICODE(self->wholeLineUnicodeText);
-    Py_UNICODE* wholeLineUnicodeBufferLower = PyUnicode_AS_UNICODE(self->wholeLineUnicodeTextLower);
+
+    // Free previously allocated buffers before allocating new ones
+    if (self->unicodeTextBuffer != NULL)
+        PyMem_Free(self->unicodeTextBuffer);
+    if (self->unicodeTextBufferLower != NULL)
+        PyMem_Free(self->unicodeTextBufferLower);
+
+    // Allocate new buffers and store them for later cleanup
+    self->unicodeTextBuffer = PyUnicode_AsUCS4Copy(self->wholeLineUnicodeText);
+    self->unicodeTextBufferLower = PyUnicode_AsUCS4Copy(self->wholeLineUnicodeTextLower);
 
    // update text, textLen, column
-    self->unicodeText = wholeLineUnicodeBuffer + currentColumnIndex;
-    self->unicodeTextLower = wholeLineUnicodeBufferLower + currentColumnIndex;
+    self->unicodeText = self->unicodeTextBuffer + currentColumnIndex;
+    self->unicodeTextLower = self->unicodeTextBufferLower + currentColumnIndex;
     self->currentColumnIndex = currentColumnIndex;
 
     prevTextLen = self->textLen;
@@ -631,7 +672,7 @@ TextToMatchObject_internal_update(TextToMatchObject_internal* self,
 
     if (currentColumnIndex > 0)
     {
-        Py_UNICODE prevChar = wholeLineUnicodeBuffer[currentColumnIndex - 1];
+        Py_UCS4 prevChar = self->unicodeTextBuffer[currentColumnIndex - 1];
         bool previousCharIsSpace = Py_UNICODE_ISSPACE(prevChar);
 
         // update firstNonSpace
@@ -1082,8 +1123,8 @@ DECLARE_RULE_METHODS_AND_TYPE(DetectChar);
 typedef struct {
     AbstractRule_HEAD
     /* Type-specific fields go here. */
-    Py_UNICODE char_;
-    Py_UNICODE char1_;
+    Py_UCS4 char_;
+    Py_UCS4 char1_;
 } Detect2Chars;
 
 
@@ -1111,7 +1152,7 @@ Detect2Chars_init(Detect2Chars *self, PyObject *args, PyObject *kwds)
 {
     PyObject* abstractRuleParams = NULL;
     PyObject* string = NULL;
-    Py_UNICODE* unicode;
+    Py_UCS4* unicode;
 
     self->_tryMatch = Detect2Chars_tryMatch;
 
@@ -1123,9 +1164,10 @@ Detect2Chars_init(Detect2Chars *self, PyObject *args, PyObject *kwds)
 
     UNICODE_CHECK(string, -1);
 
-    unicode = PyUnicode_AS_UNICODE(string);
+    unicode = PyUnicode_AsUCS4Copy(string);
     self->char_ = unicode[0];
     self->char1_ = unicode[1];
+    PyMem_Free(unicode);
 
     return 0;
 }
@@ -1153,16 +1195,22 @@ static RuleTryMatchResult_internal
 AnyChar_tryMatch(AnyChar* self, TextToMatchObject_internal* textToMatchObject)
 {
     Py_ssize_t i;
-    Py_ssize_t size = PyUnicode_GET_SIZE(self->string);
-    Py_UNICODE* unicode = PyUnicode_AS_UNICODE(self->string);
-    Py_UNICODE char_ = textToMatchObject->unicodeText[0];
+    Py_ssize_t size = PyUnicode_GET_LENGTH(self->string);
+    Py_UCS4* unicode = PyUnicode_AsUCS4Copy(self->string);
+    Py_UCS4 char_ = textToMatchObject->unicodeText[0];
+    RuleTryMatchResult_internal result;
 
     for (i = 0; i < size; i++)
     {
         if (unicode[i] == char_)
-            return MakeTryMatchResult(self, 1, NULL);
+        {
+            result = MakeTryMatchResult(self, 1, NULL);
+            PyMem_Free(unicode);
+            return result;
+        }
     }
 
+    PyMem_Free(unicode);
     return MakeEmptyTryMatchResult();
 }
 
@@ -1537,6 +1585,7 @@ typedef struct {
     char* utf8String;
     size_t stringLen;
     bool insensitive;
+    bool minimal;
     bool wordStart;
     bool lineStart;
     pcre* regExp;
@@ -1555,7 +1604,7 @@ RegExpr_dealloc_fields(RegExpr* self)
 }
 
 static pcre*
-_compileRegExp(const char* utf8String, bool insensitive, pcre_extra** pExtra)
+_compileRegExp(const char* utf8String, bool insensitive, bool minimal, pcre_extra** pExtra)
 {
     const char* errptr = NULL;
     int erroffset = 0;
@@ -1564,6 +1613,9 @@ _compileRegExp(const char* utf8String, bool insensitive, pcre_extra** pExtra)
     int options = PCRE_ANCHORED | PCRE_UTF8 | PCRE_NO_UTF8_CHECK;
     if (insensitive)
         options |= PCRE_CASELESS;
+
+    if (minimal)
+        options |= PCRE_UNGREEDY;  // NOTE this flag works correctly only if reg exp patterns are greedy by default
 
     regExp = pcre_compile(utf8String,
                           options,
@@ -1648,7 +1700,7 @@ RegExpr_tryMatch(RegExpr* self, TextToMatchObject_internal* textToMatchObject)
         if (stringLen <= 0)
             return MakeEmptyTryMatchResult();
 
-        regExp = _compileRegExp(buffer, self->insensitive, NULL);
+        regExp = _compileRegExp(buffer, self->insensitive, self->minimal, NULL);
     }
     else
     {
@@ -1659,10 +1711,21 @@ RegExpr_tryMatch(RegExpr* self, TextToMatchObject_internal* textToMatchObject)
     if (NULL == regExp)
         return MakeEmptyTryMatchResult();
 
-    matchLen = _matchRegExp(regExp, extra, textToMatchObject->utf8Text, textToMatchObject->textLen, &groups);
+    int matchLenUtf8 = _matchRegExp(
+        regExp, extra,
+        textToMatchObject->utf8Text, textToMatchObject->textLen,
+        &groups);
 
-    if (matchLen != 0)
+    PyObject* unicodeText = PyUnicode_DecodeUTF8(textToMatchObject->utf8Text, matchLenUtf8, NULL);
+    if (unicodeText == NULL) {
+        return MakeEmptyTryMatchResult();
+    }
+    matchLen = PyUnicode_GET_LENGTH(unicodeText);
+    Py_DECREF(unicodeText);
+
+    if (matchLen != 0) {
         return MakeTryMatchResult(self, matchLen, groups);
+    }
     else
         return MakeEmptyTryMatchResult();
 }
@@ -1673,25 +1736,28 @@ RegExpr_init(RegExpr *self, PyObject *args, PyObject *kwds)
     PyObject* abstractRuleParams = NULL;
     PyObject* string = NULL;
     PyObject* insensitive = NULL;
+    PyObject* minimal = NULL;
     PyObject* wordStart = NULL;
     PyObject* lineStart = NULL;
     PyObject* utf8String;
 
     self->_tryMatch = RegExpr_tryMatch;
 
-    if (! PyArg_ParseTuple(args, "|OOOOO", &abstractRuleParams,
-                           &string, &insensitive, &wordStart, &lineStart))
+    if (! PyArg_ParseTuple(args, "|OOOOOO", &abstractRuleParams,
+                           &string, &insensitive, &minimal, &wordStart, &lineStart))
         return -1;
 
     TYPE_CHECK(abstractRuleParams, AbstractRuleParams, -1);
     UNICODE_CHECK(string, -1);
     BOOL_CHECK(insensitive, -1);
+    BOOL_CHECK(minimal, -1);
     BOOL_CHECK(wordStart, -1);
     BOOL_CHECK(lineStart, -1);
 
     ASSIGN_FIELD(AbstractRuleParams, abstractRuleParams);
 
     ASSIGN_BOOL_FIELD(insensitive);
+    ASSIGN_BOOL_FIELD(minimal);
     ASSIGN_BOOL_FIELD(wordStart);
     ASSIGN_BOOL_FIELD(lineStart);
 
@@ -1704,7 +1770,7 @@ RegExpr_init(RegExpr *self, PyObject *args, PyObject *kwds)
     }
     else
     {
-        self->regExp = _compileRegExp(PyBytes_AsString(utf8String), self->insensitive, &(self->extra));
+        self->regExp = _compileRegExp(PyBytes_AsString(utf8String), self->insensitive, self->minimal, &(self->extra));
     }
     Py_DECREF(utf8String);
 
@@ -1717,7 +1783,7 @@ DECLARE_RULE_METHODS_AND_TYPE(RegExpr);
 /********************************************************************************
  *                                Int
  ********************************************************************************/
-size_t AbstractNumberRule_countDigits(Py_UNICODE* text, size_t textLen)
+size_t AbstractNumberRule_countDigits(Py_UCS4* text, size_t textLen)
 {
     size_t i;
 
@@ -1833,7 +1899,7 @@ AbstractNumberRule_tryMatch(AbstractRule* self,
         return MakeEmptyTryMatchResult();
 
     matchEndIndex = textToMatchObject->currentColumnIndex + index;
-    if (matchEndIndex < PyUnicode_GET_SIZE(textToMatchObject->wholeLineUnicodeText))
+    if (matchEndIndex < PyUnicode_GET_LENGTH(textToMatchObject->wholeLineUnicodeText))
     {
         size_t i;
         bool haveMatch = false;
@@ -1981,7 +2047,7 @@ HlCOct_dealloc_fields(HlCOct* self)
 }
 
 static bool
-_isOctChar(Py_UNICODE symbol)
+_isOctChar(Py_UCS4 symbol)
 {
     return (symbol >= '0' && symbol <= '7');
 }
@@ -2043,7 +2109,7 @@ HlCHex_dealloc_fields(HlCHex* self)
 }
 
 static bool
-_isHexChar(Py_UNICODE symbol)
+_isHexChar(Py_UCS4 symbol)
 {
     return (symbol >= '0' && symbol <= '9') ||
            (symbol >= 'a' && symbol <= 'f');
@@ -2100,7 +2166,7 @@ DECLARE_RULE_METHODS_AND_TYPE(HlCHex);
  ********************************************************************************/
 
 static bool
-_charInString(Py_UNICODE character, const char* string)
+_charInString(Py_UCS4 character, const char* string)
 {
     char charToSearch = (char)character;
 
@@ -2111,7 +2177,7 @@ _charInString(Py_UNICODE character, const char* string)
 }
 
 static int
-_checkEscapedChar(Py_UNICODE* textLower, size_t textLen)
+_checkEscapedChar(Py_UCS4* textLower, size_t textLen)
 {
     size_t index = 0;
     if (textLen > 1 && textLower[0] == '\\')
@@ -2251,8 +2317,8 @@ DECLARE_RULE_METHODS_AND_TYPE(HlCChar);
 typedef struct {
     AbstractRule_HEAD
     /* Type-specific fields go here. */
-    Py_UNICODE char_;
-    Py_UNICODE char1_;
+    Py_UCS4 char_;
+    Py_UCS4 char1_;
 } RangeDetect;
 
 
@@ -2268,7 +2334,7 @@ RangeDetect_tryMatch(RangeDetect* self, TextToMatchObject_internal* textToMatchO
     {
         int end = -1;
         int i;
-        for (i = 0; i < textToMatchObject->textLen; i++)
+        for (i = 1; i < textToMatchObject->textLen; i++)
         {
             if (textToMatchObject->unicodeText[i] == self->char1_)
             {
@@ -2301,8 +2367,17 @@ RangeDetect_init(RangeDetect *self, PyObject *args, PyObject *kwds)
     UNICODE_CHECK(char1_, -1);
 
     ASSIGN_FIELD(AbstractRuleParams, abstractRuleParams);
-    self->char_ = PyUnicode_AS_UNICODE(char_)[0];
-    self->char1_ = PyUnicode_AS_UNICODE(char1_)[0];
+
+    {
+        Py_UCS4* charBuffer = PyUnicode_AsUCS4Copy(char_);
+        self->char_ = charBuffer[0];
+        PyMem_Free(charBuffer);
+    }
+    {
+        Py_UCS4* char1Buffer = PyUnicode_AsUCS4Copy(char1_);
+        self->char1_ = char1Buffer[0];
+        PyMem_Free(char1Buffer);
+    }
 
     return 0;
 }
@@ -2655,6 +2730,7 @@ Context_dealloc(Context* self)
     Py_XDECREF(self->format);
     Py_XDECREF(self->lineEndContext);
     Py_XDECREF(self->lineBeginContext);
+    Py_XDECREF(self->lineEmptyContext);
     Py_XDECREF(self->fallthroughContext);
     Py_XDECREF(self->rulesPython);
     Py_XDECREF(self->textTypePython);
@@ -2690,13 +2766,15 @@ Context_setValues(Context *self, PyObject *args)
     PyObject* format = NULL;
     PyObject* lineEndContext = NULL;
     PyObject* lineBeginContext = NULL;
+    PyObject* lineEmptyContext = NULL;
     PyObject* fallthroughContext = NULL;
     PyObject* dynamic = NULL;
     PyObject* textTypePython = NULL;
 
-    if (! PyArg_ParseTuple(args, "|OOOOOOO",
-                           &attribute, &format, &lineEndContext,
-                           &lineBeginContext, &fallthroughContext,
+    if (! PyArg_ParseTuple(args, "|OOOOOOOO",
+                           &attribute, &format,
+                           &lineEndContext, &lineBeginContext,
+                           &lineEmptyContext, &fallthroughContext,
                            &dynamic, &textTypePython))
         Py_RETURN_NONE;
 
@@ -2704,6 +2782,8 @@ Context_setValues(Context *self, PyObject *args)
         TYPE_CHECK(lineEndContext, ContextSwitcher, NULL);
     if (Py_None != lineBeginContext)
         TYPE_CHECK(lineBeginContext, ContextSwitcher, NULL);
+    if (Py_None != lineEmptyContext)
+        TYPE_CHECK(lineEmptyContext, ContextSwitcher, NULL);
     if (Py_None != fallthroughContext)
         TYPE_CHECK(fallthroughContext, ContextSwitcher, NULL);
     BOOL_CHECK(dynamic, NULL);
@@ -2712,10 +2792,15 @@ Context_setValues(Context *self, PyObject *args)
     ASSIGN_PYOBJECT_FIELD(format);
     ASSIGN_PYOBJECT_FIELD(lineEndContext);
     ASSIGN_PYOBJECT_FIELD(lineBeginContext);
+    ASSIGN_PYOBJECT_FIELD(lineEmptyContext);
     ASSIGN_FIELD(ContextSwitcher, fallthroughContext);
     ASSIGN_BOOL_FIELD(dynamic);
     ASSIGN_PYOBJECT_FIELD(textTypePython);
-    self->textType = PyUnicode_AsUnicode(textTypePython)[0];
+    {
+        Py_UCS4* textTypeBuffer = PyUnicode_AsUCS4Copy(textTypePython);
+        self->textType = textTypeBuffer[0];
+        PyMem_Free(textTypeBuffer);
+    }
 
     Py_RETURN_NONE;
 }
@@ -2753,11 +2838,12 @@ Context_appendSegment(PyObject* segmentList, size_t count, PyObject* format)
     {
         PyObject* segment = Py_BuildValue("iO", count, format);
         PyList_Append(segmentList, segment);
+        Py_DECREF(segment);  // PyList_Append increments refcount, so we must decref
     }
 }
 
 static void
-Context_appendTextType(size_t fromIndex, size_t count, PyObject* textTypeMap, Py_UNICODE textType)
+Context_appendTextType(size_t fromIndex, size_t count, PyObject* textTypeMap, Py_UCS4 textType)
 {
     size_t i;
     for (i = fromIndex; i < fromIndex + count; i++)
@@ -2783,110 +2869,141 @@ Context_parseBlock(Context* self,
                                                     unicodeText,
                                                     ContextStack_currentData(*pContextStack));
 
-    wholeLineLen = PyUnicode_GET_SIZE(textToMatchObject.wholeLineUnicodeText);
+    wholeLineLen = PyUnicode_GET_LENGTH(textToMatchObject.wholeLineUnicodeText);
 
     *pLineContinue = false;
 
-    while (currentColumnIndex < wholeLineLen)
+    if (wholeLineLen == 0)
     {
-        size_t i;
-        RuleTryMatchResult_internal result;
-
-        Parser* parentParser = (Parser*)self->parser;
-        TextToMatchObject_internal_update(&textToMatchObject, currentColumnIndex, &parentParser->deliminatorSet);
-
-        result.rule = NULL;
-
-        for (i = 0; i < self->rulesSize; i++)
+        if ((PyObject*)self->lineEmptyContext != Py_None)
         {
-            result = AbstractRule_tryMatch_internal((AbstractRule*)self->rulesC[i], &textToMatchObject);
-
-            if (NULL != result.rule)
-                break;
-        }
-
-        if (NULL != result.rule)  // if something matched
-        {
-            PyObject* format;
-            Py_UNICODE textType;
-            *pLineContinue = result.lineContinue;
-
-            if (parentParser->debugOutputEnabled)
-            {
-                fprintf(stderr, "qutepart: \t");
-                PyObject_Print(self->name, stderr, 0);
-                fprintf(stderr, ": matched rule %zu at %zu\n", i, currentColumnIndex);
-            }
-
-            if (countOfNotMatchedSymbols > 0)
-            {
-                Context_appendSegment(segmentList, countOfNotMatchedSymbols, self->format);
-                Context_appendTextType(currentColumnIndex - countOfNotMatchedSymbols, countOfNotMatchedSymbols,
-                                       textTypeMap, self->textType);
-                countOfNotMatchedSymbols = 0;
-            }
-
-            if (Py_None != result.rule->abstractRuleParams->attribute)
-                format = result.rule->abstractRuleParams->format;
-            else
-                format = self->format;
-
-            if ('\0' != result.rule->abstractRuleParams->textType)
-                textType = result.rule->abstractRuleParams->textType;
-            else
-                textType = self->textType;
-
-            Context_appendSegment(segmentList,
-                                  result.length,
-                                  format);
-            Context_appendTextType(currentColumnIndex, result.length,
-                                   textTypeMap,
-                                   textType);
-            currentColumnIndex += result.length;
-
-            if (Py_None != (PyObject*)result.rule->abstractRuleParams->context)
-            {
-                ContextStack* newContextStack =
-                    ContextSwitcher_getNextContextStack(result.rule->abstractRuleParams->context,
+            ContextStack* newContextStack =
+                    ContextSwitcher_getNextContextStack((ContextSwitcher*)self->lineEmptyContext,
                                                         *pContextStack,
-                                                        result.data);
-
-                RuleTryMatchResult_internal_free(&result);
-
-                if (newContextStack != *pContextStack)
-                {
-                    ASSIGN_VALUE(ContextStack, *pContextStack, newContextStack);
-                    break; // while
-                }
-                else if (0 == result.length)
-                {
-                    // Parsed didn't switch context or consume character. The same situation will occur on next step
-                    fprintf(stderr, "qutepart: loop detected\n");
-                    currentColumnIndex ++;  // parsing bug. But avoid freeze
-                    countOfNotMatchedSymbols ++;
-                }
-            }
-        }
-        else // no match
-        {
-            *pLineContinue = false;
-            if ((PyObject*)self->fallthroughContext != Py_None)
+                                                        NULL);
+            if (newContextStack != *pContextStack)
             {
-                ContextStack* newContextStack =
-                        ContextSwitcher_getNextContextStack(self->fallthroughContext,
-                                                            *pContextStack,
-                                                            NULL);
-                if (newContextStack != *pContextStack)
-                {
-                    ASSIGN_VALUE(ContextStack, *pContextStack, newContextStack);
-                    break; // while
-                }
+                ASSIGN_NEW_VALUE(ContextStack, *pContextStack, newContextStack);
+            }
+        }
+    }
+    else
+    {
+        while (currentColumnIndex < wholeLineLen)
+        {
+            size_t i;
+            RuleTryMatchResult_internal result;
+
+            Parser* parentParser = (Parser*)self->parser;
+            TextToMatchObject_internal_update(&textToMatchObject, currentColumnIndex, &parentParser->deliminatorSet);
+
+            result.rule = NULL;
+
+            for (i = 0; i < self->rulesSize; i++)
+            {
+                result = AbstractRule_tryMatch_internal((AbstractRule*)self->rulesC[i], &textToMatchObject);
+
+                if (NULL != result.rule)
+                    break;
             }
 
-            countOfNotMatchedSymbols++;
-            currentColumnIndex++;
-        }
+            if (NULL != result.rule)  // if something matched
+            {
+                PyObject* format;
+                Py_UCS4 textType;
+                *pLineContinue = result.lineContinue;
 
+                if (parentParser->debugOutputEnabled)
+                {
+                    fprintf(stderr, "qutepart: \t");
+                    PyObject_Print(self->name, stderr, 0);
+                    fprintf(stderr, ": matched rule %zu at %zu\n", i, currentColumnIndex);
+                }
+
+                if (countOfNotMatchedSymbols > 0)
+                {
+                    Context_appendSegment(segmentList, countOfNotMatchedSymbols, self->format);
+                    Context_appendTextType(currentColumnIndex - countOfNotMatchedSymbols, countOfNotMatchedSymbols,
+                                           textTypeMap, self->textType);
+                    countOfNotMatchedSymbols = 0;
+                }
+
+                ContextStack* newContextStack = NULL;
+                if (Py_None != (PyObject*)result.rule->abstractRuleParams->context)
+                {
+                    newContextStack =
+                        ContextSwitcher_getNextContextStack(result.rule->abstractRuleParams->context,
+                                                            *pContextStack,
+                                                            result.data);
+                } else
+                {
+                    newContextStack = *pContextStack;
+                }
+
+                if (Py_None != result.rule->abstractRuleParams->attribute)
+                    format = result.rule->abstractRuleParams->format;
+                else
+                    format = ContextStack_currentContext(newContextStack)->format;
+
+                if ('\0' != result.rule->abstractRuleParams->textType)
+                    textType = result.rule->abstractRuleParams->textType;
+                else
+                    textType = ContextStack_currentContext(newContextStack)->textType;
+
+                Context_appendSegment(segmentList,
+                                      result.length,
+                                      format);
+                Context_appendTextType(currentColumnIndex, result.length,
+                                       textTypeMap,
+                                       textType);
+                currentColumnIndex += result.length;
+
+                if (Py_None != (PyObject*)result.rule->abstractRuleParams->context)
+                {
+                    // Store result.length before freeing since we need it after
+                    size_t matchedLength = result.length;
+                    RuleTryMatchResult_internal_free(&result);
+
+                    if (newContextStack != *pContextStack)
+                    {
+                        ASSIGN_NEW_VALUE(ContextStack, *pContextStack, newContextStack);
+                        break; // while
+                    }
+                    else if (0 == matchedLength)
+                    {
+                        // Parsed didn't switch context or consume character. The same situation will occur on next step
+                        fprintf(stderr, "qutepart: loop detected\n");
+                        currentColumnIndex ++;  // parsing bug. But avoid freeze
+                        countOfNotMatchedSymbols ++;
+                    }
+                }
+                else
+                {
+                    // No context switch, but still need to free the match result data
+                    RuleTryMatchResult_internal_free(&result);
+                }
+            }
+            else // no match
+            {
+                *pLineContinue = false;
+                if ((PyObject*)self->fallthroughContext != Py_None)
+                {
+                    ContextStack* newContextStack =
+                            ContextSwitcher_getNextContextStack(self->fallthroughContext,
+                                                                *pContextStack,
+                                                                NULL);
+                    if (newContextStack != *pContextStack)
+                    {
+                        ASSIGN_NEW_VALUE(ContextStack, *pContextStack, newContextStack);
+                        break; // while
+                    }
+                }
+
+                countOfNotMatchedSymbols++;
+                currentColumnIndex++;
+            }
+
+        }
     }
 
     if (countOfNotMatchedSymbols > 0)
@@ -3039,13 +3156,12 @@ Parser_parseBlock_internal(Parser *self, PyObject *args, bool returnSegments)
         Py_INCREF(Py_None);
     }
 
-    textLen = PyUnicode_GET_SIZE(unicodeText);
+    textLen = PyUnicode_GET_LENGTH(unicodeText);
     textTypeMap = PyUnicode_New(textLen, 65535);
     if (textLen > 0)
         PyUnicode_Fill(textTypeMap, 0, textLen, ' ');
 
-    while (currentColumnIndex < textLen)
-    {
+    do {
         size_t length;
 
         if (self->debugOutputEnabled)
@@ -3064,7 +3180,7 @@ Parser_parseBlock_internal(Parser *self, PyObject *args, bool returnSegments)
                                      &lineContinue);
         currentColumnIndex += length;
         currentContext = ContextStack_currentContext(contextStack);
-    }
+    } while (currentColumnIndex < textLen);
 
     if ( ! lineContinue)
     {
@@ -3074,7 +3190,11 @@ Parser_parseBlock_internal(Parser *self, PyObject *args, bool returnSegments)
                            ContextSwitcher_getNextContextStack((ContextSwitcher*)currentContext->lineEndContext,
                                                                contextStack,
                                                                NULL);
-            ASSIGN_VALUE(ContextStack, contextStack, newContextStack);
+            // Only update if a new object was returned (not when max depth returns same stack)
+            if (newContextStack != contextStack)
+            {
+                ASSIGN_NEW_VALUE(ContextStack, contextStack, newContextStack);
+            }
 
             if (currentContext == ContextStack_currentContext(contextStack))
             {
@@ -3093,7 +3213,11 @@ Parser_parseBlock_internal(Parser *self, PyObject *args, bool returnSegments)
                            ContextSwitcher_getNextContextStack((ContextSwitcher*)currentContext->lineBeginContext,
                                                                contextStack,
                                                                NULL);
-            ASSIGN_VALUE(ContextStack, contextStack, newContextStack);
+            // Only update if a new object was returned (not when max depth returns same stack)
+            if (newContextStack != contextStack)
+            {
+                ASSIGN_NEW_VALUE(ContextStack, contextStack, newContextStack);
+            }
 
             currentContext = ContextStack_currentContext(contextStack);
         }
@@ -3103,6 +3227,7 @@ Parser_parseBlock_internal(Parser *self, PyObject *args, bool returnSegments)
     {
         Py_DECREF(contextStack);
         Py_DECREF(textTypeMap);
+        Py_DECREF(segmentList);  // Free segmentList on error path
         return NULL;
     }
     else
@@ -3121,12 +3246,17 @@ Parser_parseBlock_internal(Parser *self, PyObject *args, bool returnSegments)
             Py_DECREF(contextStack);
         }
 
-        retContextData = Py_BuildValue("OO", retStack, textTypeMap);
+        // Use "N" instead of "O" to steal references (avoid incrementing refcount)
+        // This prevents memory leaks since these objects are newly created
+        retContextData = Py_BuildValue("NN", retStack, textTypeMap);
 
         if (Py_None != segmentList)
-            return Py_BuildValue("OO", retContextData, segmentList);
+            return Py_BuildValue("NN", retContextData, segmentList);
         else
+        {
+            Py_DECREF(segmentList);  // Release the INCREF'd Py_None
             return retContextData;
+        }
     }
 }
 

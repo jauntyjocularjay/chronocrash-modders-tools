@@ -13,7 +13,8 @@ def threaded(f):
 		#t = multiprocessing.Process(target = func, args = args, kwargs = kwargs)
 		t.setDaemon(True)
 		t.start()
-		
+		return t # so callers can join() it, e.g. to wait for the settings save before quitting
+
 	return wrapper
 
 

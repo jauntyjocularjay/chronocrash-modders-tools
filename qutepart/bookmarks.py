@@ -2,7 +2,7 @@
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QAction
-from PyQt5.QtGui import QIcon, QKeySequence, QTextCursor
+from PyQt5.QtGui import QKeySequence, QTextCursor
 
 import qutepart
 
@@ -13,11 +13,11 @@ class Bookmarks:
     def __init__(self, qpart, markArea):
         self._qpart = qpart
         self._markArea = markArea
-        qpart.toggleBookmarkAction = self._createAction(qpart, "bookmark.png", "Toogle bookmark", 'Ctrl+B',
+        qpart.toggleBookmarkAction = self._createAction(qpart, "emblem-favorite", "Toogle bookmark", 'Ctrl+B',
                                                         self._onToggleBookmark)
-        qpart.prevBookmarkAction = self._createAction(qpart, "up.png", "Previous bookmark", 'Alt+PgUp',
+        qpart.prevBookmarkAction = self._createAction(qpart, "go-up", "Previous bookmark", 'Alt+PgUp',
                                                       self._onPrevBookmark)
-        qpart.nextBookmarkAction = self._createAction(qpart, "down.png", "Next bookmark", 'Alt+PgDown',
+        qpart.nextBookmarkAction = self._createAction(qpart, "go-down", "Next bookmark", 'Alt+PgDown',
                                                       self._onNextBookmark)
 
         markArea.blockClicked.connect(self._toggleBookmark)
@@ -25,7 +25,7 @@ class Bookmarks:
     def _createAction(self, widget, iconFileName, text, shortcut, slot):
         """Create QAction with given parameters and add to the widget
         """
-        icon = QIcon(qutepart.getIconPath(iconFileName))
+        icon = qutepart.getIcon(iconFileName)
         action = QAction(icon, text, widget)
         action.setShortcut(QKeySequence(shortcut))
         action.setShortcutContext(Qt.WidgetShortcut)
@@ -35,6 +35,14 @@ class Bookmarks:
 
         return action
 
+    def removeActions(self):
+        self._qpart.removeAction(self._qpart.toggleBookmarkAction)
+        self._qpart.toggleBookmarkAction = None
+        self._qpart.removeAction(self._qpart.prevBookmarkAction)
+        self._qpart.prevBookmarkAction = None
+        self._qpart.removeAction(self._qpart.nextBookmarkAction)
+        self._qpart.nextBookmarkAction = None
+
     def clear(self, startBlock, endBlock):
         """Clear bookmarks on block range including start and end
         """
@@ -43,19 +51,18 @@ class Bookmarks:
             if block == endBlock:
                 break
 
-    @staticmethod
-    def isBlockMarked(block):
+    def isBlockMarked(self, block):
         """Check if block is bookmarked
         """
-        return block.userState() == 1
+        return self._markArea.isBlockMarked(block)
 
     def _setBlockMarked(self, block, marked):
         """Set block bookmarked
         """
-        block.setUserState(1 if marked else -1)
+        self._markArea.setBlockValue(block, 1 if marked else 0)
 
     def _toggleBookmark(self, block):
-        self._setBlockMarked(block, not self.isBlockMarked(block))
+        self._markArea.toggleBlockMark(block)
         self._markArea.update()
 
     def _onToggleBookmark(self):

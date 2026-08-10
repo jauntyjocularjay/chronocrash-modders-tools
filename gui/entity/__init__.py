@@ -1,4 +1,4 @@
-import os, re, time
+import os, re, time, logging
 # blabla
 
 from PyQt5 import QtCore, QtGui, QtWidgets, QtMultimedia
@@ -10,19 +10,32 @@ from gui.util import FileInput, loadSprite, loadACTPalette
 
 from gui.portrait import IconViewer, Portrait
 
-from qutepart import Qutepart, EverydayPart
+# from qutepart import Qutepart
+from gui.main.everydaypart import EverydayPart
 
 from data import ParsedLine, ParsedLineMask, BBox, AttackBox, Cache, BindData
 from common.util import parseInt, parseFloat
 
 
-from gui.entity.animselector import AnimSelector
+# from gui.entity.animselector import AnimSelector
+from gui.json_editor.keyselector import KeySelector
 from gui.entity.frameproperties import FramePropertiesEditor, BindingEditor, OnionSkinEditor
 
 from gui.level.items import Wall, Entity
 
 
 IGNORE_LIST = settings.get_option('entity/ignore_commands', [])
+
+defaultCompact = True
+
+class FocusSwitcher(QtWidgets.QLabel):
+	
+	def __init__(self, parent, text):
+		self.parent = parent
+		QtWidgets.QLabel.__init__(self, text)
+		
+	def enterEvent(self, e):
+		self.parent.switchFocus()
 
 
 def convertRect(x, y, x2, y2):
@@ -65,7 +78,7 @@ class Platform:
 		
 	def getText(self):
 		print(self.data)
-		return 'platform ' + ' '.join(map(str, map(int, self.data)))
+		return '\tplatform ' + ' '.join(map(str, map(int, self.data)))
 	
 	def platformUpdated(self):
 		self.data = list(self.wall.getParams())[0:8] # don't take type
@@ -136,6 +149,9 @@ class Range3DBox:
 		self.wall.second.setPen(pen)
 		self.wall.second.hide()
 		
+		for line in self.wall.lines:
+			line.hide()
+		
 		
 		self.wall.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False);
 		self.wall.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False);
@@ -177,7 +193,7 @@ class Anim:
 			val = 0
 		
 		i = frameNumber
-		while i > 0 and 'drawmethod_' + prop not in self.frames[i]:
+		while i > 0 and 'drawmethod_' + prop not in self.frames[i] and 'nodrawmethod' not in self.frames[i]:
 			i-=1
 		
 		if 'drawmethod_' + prop in self.frames[i]: 
@@ -203,10 +219,11 @@ class Anim:
 			
 		return box
 		
-	def getPlatform(self, frameNumber=None):
+	def getPlatform(self, frameNumber=None, create=False):
 		if frameNumber is None:
 			frameNumber = self.currentFrame
-		platform = Platform()
+		# platform = Platform()
+		platform = None
 		
 		i = frameNumber
 		while i > 0 and 'platform' not in self.frames[i]:
@@ -215,26 +232,58 @@ class Anim:
 		if 'platform' in self.frames[i]:
 			platform = self.frames[i]['platform']
 			
+		if create and platform == None:
+			platform = Platform()
+			
 		return platform
 
 
-	
+	def getABox(self, frameNumber, ignoreCollision=-1):
+		done = {}
+		activeBBoxes = []
 		
+		#x, y, w, h, z = None, None, None, None, None
+		i = frameNumber
+		while i >= 0:
+			# len(self.frames[i]['bbox']) == 0:
+			for collisionIndex, bbox in self.frames[i]['attack'].items():
+				if collisionIndex == ignoreCollision: continue
+				print('abox before', 'frame', i, bbox.data)
+				if(collisionIndex not in done):
+					activeBBoxes.append(bbox)
+					done[collisionIndex] = True
+			i-=1
+		
+		if (len(activeBBoxes) > 0):
+			print('abox', activeBBoxes[0].data)
+		return activeBBoxes
 		
 	def getBBox(self, frameNumber):
+		done = {}
+		activeBBoxes = []
 		bbox = BBox()
 		#x, y, w, h, z = None, None, None, None, None
 		i = frameNumber
-		while i > 0 and 'bbox' not in self.frames[i]:
+		while i >= 0:
+			# len(self.frames[i]['bbox']) == 0:
+			print('bbox frame', frameNumber, self.frames[i]['bbox'])
+			for collisionIndex, bbox in self.frames[i]['bbox'].items():
+				print('bbox details', collisionIndex, bbox)
+				if(collisionIndex not in done):
+					activeBBoxes.append(bbox)
+					done[collisionIndex] = True
 			i-=1
+			
+		return activeBBoxes
 		
-		if 'bbox' in self.frames[i]:
-			bbox = self.frames[i]['bbox']
-			#x, y, w, h = self.frames[i]['bbox'][0:4]
-			#if len(self.frames[i]['bbox']) == 5:
-				#z = self.frames[i]['bbox'][4]
-		return bbox
-		#return x, y, w, h, z
+		# old code
+		# if 'bbox' in self.frames[i]:
+		# 	bbox = self.frames[i]['bbox']
+		# 	#x, y, w, h = self.frames[i]['bbox'][0:4]
+		# 	#if len(self.frames[i]['bbox']) == 5:
+		# 		#z = self.frames[i]['bbox'][4]
+		# return bbox
+		# #return x, y, w, h, z
 		
 		
 	def getOffset(self, frameNumber):
@@ -267,7 +316,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 	except AttributeError:
 		print("FATAL ERROR")
 	
-	def __init__(self):
+	def __init__(self, parent):
+		self.parent = parent
 		QtWidgets.QWidget.__init__(self)
 		layout = QtWidgets.QHBoxLayout()
 		layout.setContentsMargins(0, 0, 0, 0)
@@ -277,21 +327,28 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		self.mainSplitter.setContentsMargins(0, 0, 0, 0)
 		layout.addWidget(self.mainSplitter)
 		
-		self.animSelector = AnimSelector(self)
+		# self.animSelector = AnimSelector(self)
+		self.animSelector = KeySelector(self, ['noRefresh', 'animation'], {'columnCount':3})
 		
+		
+		self.previousLine = -1
 		
 		self.frames = []
 		self.currentFrame = 0
 		self.anim = Anim(self.frames)
 		
+		self.animMemoryCache = {}
 		self.PROJECTS_VARS = {}
 		
 		#self.pixmapCache = {}
 		
 		
-
+		self.focused = False
 		
-	
+		self.currentExpand  = {'frame':-1, 'prop':None}
+
+		self.currentAnim = None
+		self.currentEntityKey = None
 
 		#self.loadEntity('oro')
 
@@ -330,7 +387,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		
 		#self.editorTabWidget = QtWidgets.QTabWidget(self)
 		
-		
+		self.undoStates = []
+		self.redoStates = []
 		
 		
 		self.frameEditor = FrameEditor(self)
@@ -377,6 +435,45 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		self.replaceEntry.setPlaceholderText('Replace with...')
 		self.replaceEntry.returnPressed.connect(self.replace)
 		
+		
+		# BEGIN BUTTON BAR
+		theme = settings.get_option('gui/widgets_theme', None)
+		
+		if(theme == "Dark"):
+			self.dark = True
+		else:
+			self.dark = False
+		
+		
+		self.buttonBar = QtWidgets.QToolBar()
+		# self.buttonBar.setContentsMargins(0, 0, 0, 0)
+		self.setStyleSheet("QToolBar { margin:0px; padding:0px; }");
+		 # border-top:1px solid #c9c9c9;
+		# saveIcon = QtGui.QIcon.fromTheme('document-save')
+		saveImage = QtGui.QImage('icons/save.svg')
+		if(theme == "Dark"): saveImage.invertPixels()
+		
+		saveIcon = QtGui.QIcon(QtGui.QPixmap.fromImage(saveImage))
+		
+		save = self.buttonBar.addAction(saveIcon, _('Save file (Ctrl+S)'), self.save)
+		self.saveAction = save
+		# self.saveAction.setVisible(False)
+		self.saveAction.setEnabled(False)
+		
+		saveImage = QtGui.QImage('icons/undo.svg')
+		if(theme == "Dark"): saveImage.invertPixels()
+		
+		undoIcon = QtGui.QIcon(QtGui.QPixmap.fromImage(saveImage))
+		save = self.buttonBar.addAction(undoIcon, _('Undo (Ctrl+Z)'), self.undo)
+		
+		saveImage = QtGui.QImage('icons/redo.svg')
+		if(theme == "Dark"): saveImage.invertPixels()
+		
+		redoIcon = QtGui.QIcon(QtGui.QPixmap.fromImage(saveImage))
+		save = self.buttonBar.addAction(redoIcon, _('Redo (Ctrl+Shift+Z)'), self.redo)
+		
+		
+		fullEditorLayout.addWidget(self.buttonBar, 0)
 		fullEditorLayout.addWidget(editor, 1)
 		fullEditorLayout.addWidget(self.searchEntry, 0)
 		fullEditorLayout.addWidget(self.replaceEntry, 0)
@@ -412,6 +509,9 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		self.frameEditor.loadFrame()
 		
 		
+		# QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+F'), self, self.focusForSearch, context=QtCore.Qt.ApplicationShortcut)
+		
+		
 	def projectChanged(self, projectRoot=None):
 		
 		if(projectRoot in self.PROJECTS_VARS):
@@ -435,9 +535,111 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			
 			
 		
+	def undo(self):
+		# '\n'.join(self.undoStates[0])
+		
+		
+		
+		if(self.currentUndoState == None):
+			self.currentUndoState = len(self.undoStates) - 1
+		else :
+			self.currentUndoState = self.currentUndoState -1
+			
+		if(self.currentUndoState < 0):
+			return
+			
+		
+			
+		# lines = self.undoStates[self.currentUndoState]
+		lines = self.undoStates.pop(self.currentUndoState)
+		
+		
+		self.redoState = None # so that next redo is taken from the start
+		self.redoStates.insert(0, list(self.editor.lines))
+		
+		# QtWidgets.QMessageBox.warning(self, _('TMP'), '\n'.join(lines))
+		
+		
+		self.dicData[self.currentAnim]['lines'] = lines
+		
+		
+		self.editor.updatingCursor = True
+					
+		self.editor.saveScroll()
+		
+		# logging.debug('lines states' + str( self.undoStates[0]))
+		# self.editor.lines = '\n'.join(self.undoStates[0])
+		self.editor.setPlainText('\n'.join(lines))
+		
+		self.editor.restoreScroll()
+		
+		self.editor.updatingCursor = False
+					
+		
+		
+	def redo(self):
+		if(len(self.redoStates) == 0): return
+		
+		if(self.redoState == None):
+			self.redoState = 0
+		# else :
+		# 	self.redoState = self.redoState +1
+			
+		if(self.redoState >= len(self.redoStates)):
+			return
+		
+		
+		self.undoStates.append( list(self.editor.lines))
+		
+		self.currentUndoState = None
+		# lines = self.redoStates[self.redoState]
+		lines = self.redoStates.pop(self.redoState)
+		
+		# QtWidgets.QMessageBox.warning(self, _('TMP'), str(self.redoState) + '\n'.join(lines))
+		self.dicData[self.currentAnim]['lines'] = lines
+		
+		self.editor.updatingCursor = True
+		self.editor.saveScroll()
+		self.editor.setPlainText('\n'.join(lines))
+		self.editor.restoreScroll()
+		
+		self.editor.updatingCursor = False
+		self.editor._updateExtraSelections()
+	
 	def tmp(self):
 		QtWidgets.QMessageBox.warning(self, _('TMP'), str(len(self.fullData)) + ' ' + str(len(self.dicData.keys())))
 	
+	
+	
+	def focusForSearch(self):
+		self.searchEntry.show()
+		self.replaceEntry.show()
+		self.searchEntry.setFocus()
+	
+	def switchFocus(self):
+		self.focused = not self.focused
+		
+		if(self.focused):
+			self.frameEditor.focusSwitcher.setText('UNFOCUS')
+			self.frameEditor.focusSwitcher.setStyleSheet("background-color: lightgreen") 
+			self.animSelector.hide()
+			self.frameViewer.hide()
+			self.parent.headerWidget.hide()
+			self.parent.fileSelector.hide()
+			self.parent.menuBar.hide()
+			self.searchEntry.hide()
+			self.replaceEntry.hide()
+		else:
+			self.frameEditor.focusSwitcher.setText('Focus')
+			self.frameEditor.focusSwitcher.setStyleSheet("") 
+			self.animSelector.show()
+			self.frameViewer.show()
+			self.parent.headerWidget.show()
+			self.parent.fileSelector.show()
+			self.parent.menuBar.show()
+			
+			self.searchEntry.show()
+			self.replaceEntry.show()
 	
 	def updateTheme(self):
 		theme = settings.get_option('gui/editor_theme', None)
@@ -474,8 +676,65 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			#return True
 		#else:
 		return False
+	
+	
+	def collapsePropGroup(self):
+		# return
+		document = self.editor.document()
+		# collapse all lines
+		i = 0
+		for line in self.editor.lines:
+			
+			pLine = ParsedLine(line)
+			part = pLine.next()
+			if(part != None):
+				if('attack.' in part or 'bbox.' in part): 
+					block = document.findBlockByNumber(i)
+					block.setVisible(False)
+				elif('{attack' in part or '{bbox' in part):
+					block = document.findBlockByNumber(i)
+					block.setVisible(True)
+			i+=1
+		self.editor.viewport().update()
+		self.editor.getMargin("line_numbers").update() # V3
+		# self.editor._lineNumberArea.update() # V2
+		
+	def expandPropGroup(self, line):
+		# return
+		# first collapse everything
+		self.collapsePropGroup()
+		
+		document = self.editor.document()
+		block = document.findBlockByNumber(line)
+		block.setVisible(False) # first, we hide the collapsed header (eg  "{attack ...}")
+		
+		# ... then we show the expanded lines
+		lines = self.editor.lines
+		
+		headerLine = lines[line]
+		prop = None
+		if('{attack' in headerLine):
+			prop = 'attack.'
+		elif('{bbox' in headerLine):
+			prop = 'bbox.'
 		
 		
+		self.currentExpand['prop'] = prop
+		
+		exit = False
+		i = line + 1
+		while i < len(lines) and not exit:
+			pLine = ParsedLine(lines[i])
+			part = pLine.next()
+			if(part != None and prop in part):
+				block = document.findBlockByNumber(i)
+				block.setVisible(True) # show hidden property
+			else:
+				exit = True
+			i+=1
+		
+		self.editor.viewport().update()
+		self.editor._lineNumberArea.update()
 
 	
 	def getFullLines(self):
@@ -515,11 +774,25 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		#print(lines)
 		self.editor.lines = lines
 		print(lines)
+		
+		self.undoStates = [ lines, ]
+		self.redoStates = []
+		self.currentUndoState = None
+		self.redoState = None
+		
+		# [CUSTOM] swap: processLines must run BEFORE rebuildText, so that self.anim/self.frames
+		# describe the anim being loaded — rebuildText injects model values into the text
+		# (delays, offsets, compact boxes) and would otherwise use the PREVIOUS anim's frames
+		# (IndexError / cross-anim data injection). Revert = put rebuildText back above.
 		self.processLines(lines)
+
+		# NEW in 0.6.0
+		self.rebuildText()
 		self.currentFrame = 0
 		self.frameEditor.loadFrame()
 		self.loadingAnim = False
-		self.frameEditor.graphicView.centerOn(0,0)
+		if settings.get_option('entity/recenter_on_anim_load', True):
+			self.frameEditor.graphicView.centerOn(0,0)
 		
 		
 	def deleteAnim(self, ID):
@@ -540,10 +813,12 @@ class EntityEditorWidget(QtWidgets.QWidget):
 	
 	def loadFile(self, path):
 		
-		f = open(path)
-		self.fullText = f.read()
-		f.close()
-		lines = self.fullText.split('\n')
+		f = FileWrapper(path)
+		# self.fullText = f.read()
+		# f.close()
+		lines  = f.getLines();
+		# lines = self.fullText.split('\n')
+		self.fullText = '\n'.join(lines)
 		self.loadLines(lines)
 		
 	'''
@@ -553,12 +828,17 @@ class EntityEditorWidget(QtWidgets.QWidget):
 	def loadLines(self, lines, model=None):
 		
 		self.updating = True
+		
+		oldCurrentAnim = self.currentAnim
 		self.currentAnim = None
 		
 		self.currentPalette =  None
 		
 		self.palettes = []
+		oldFrame = self.currentFrame
 		self.currentFrame = 0
+		
+		self.animMemoryCache[self.currentEntityKey] = {'previousFrame':oldFrame, 'previousAnim':oldCurrentAnim}
 		
 		sectionLines = []
 		data = {'ID':'header', 'label':'', 'lines':sectionLines}
@@ -585,6 +865,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			elif part == 'name':
 				name = pLine.next().lower()
 				if(model is None): model = name
+				self.currentEntityKey = EntityEditorWidget.ROOT_PATH + name
+				
 			elif part == 'type':
 				type = pLine.next().lower()
 				if model is not None:
@@ -617,9 +899,37 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			
 		self.animSelector.clear()
 		self.animSelector.load(fullData)
-
+		
+		
+		print('TOASTY', self.currentAnim, self.currentAnim in self.dicData)
+		
 		self.editor.lines = []
-		self.loadAnim('idle')
+		if(self.animMemoryMode == 'reset_idle'):
+			self.loadAnim('idle')
+		elif(self.animMemoryMode == 'restore_last'):
+			print('DOUCHTA1', self.animMemoryCache)
+			if (EntityEditorWidget.ROOT_PATH + name) not in self.animMemoryCache:
+				print('DOUCHTA2')
+				self.loadAnim('idle')
+			else:
+				self.loadAnim(self.animMemoryCache[EntityEditorWidget.ROOT_PATH + name]['previousAnim'])
+				oldFrame = self.animMemoryCache[EntityEditorWidget.ROOT_PATH + name]['previousFrame']
+				if(oldFrame < len(self.anim)):
+					self.currentFrame = oldFrame
+		else: # match with previous entity
+
+		
+			if(oldCurrentAnim is None):
+				self.loadAnim('idle')
+			elif oldCurrentAnim in self.dicData:
+				self.loadAnim(oldCurrentAnim)
+			else:
+				self.loadAnim('idle')
+				
+			if(oldFrame < len(self.anim)):
+				self.currentFrame = oldFrame
+				
+		
 		self.frameEditor.loadFrame(self.currentFrame)
 		self.updating = False
 		self.switchingFrame = False
@@ -695,8 +1005,9 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		
 		
 	def reloadSplitterPos(self):
-		splitterPos = settings.get_option('entity/secondary_splitter_pos', -1)
+		splitterPos = settings.get_option('entity/secondary_splitter_pos', 400)
 		if(splitterPos != -1): self.splitter.moveSplitter(splitterPos, 1)
+		# self.frameEditor.graphicView.centerOn(0,0)
 	
 	def getLineOf(self, frameNumber):
 		if len(self.anim) == 0 : return 0
@@ -756,17 +1067,53 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		return currentFrameNumber
 		
 		
-	def positionChanged(self):
+	def positionChanged(self): # Line changed / Line clicked
 		if self.editor.updatingCursor or self.updating or self.switchingFrame:
 			return
+			
+		legacy = settings.get_option('misc/legacy_commands', False)
 		print("\n\n*** pos changed")
 		line = self.editor.textCursor().blockNumber()
+		
+		if line == self.previousLine:
+			return
+			
+		self.previousLine = line
+		
 		print('line', line)
+		pos =  self.editor.textCursor().position()
 		print('pos', self.editor.textCursor().position())
 		if(self.editor.textCursor().hasSelection()):
 			print('has selection, return')
 			return
+			
+		
 		frameNumber = self.getNumberOfLine(line)
+		
+		if not legacy: # collapse / expand
+			lineContent = self.editor.lines[line]
+			if('{attack' in lineContent or '{bbox' in lineContent):
+				# need to get precise collision... or not
+				self.expandPropGroup(line)
+				self.currentExpand['frame'] = frameNumber
+			else:
+				if(frameNumber != self.currentExpand['frame'] or( self.currentExpand['prop'] != None and  self.currentExpand['prop'] not in lineContent)):
+					pass
+					self.editor.updatingCursor = True
+					# self.updating = True
+					# self.collapsePropGroup() # already done in rebuildText after
+					self.editor.saveScroll()
+					self.rebuildText() # in case some props where edited in text
+					
+					cursor = self.editor.textCursor()
+					cursor.setPosition(pos)
+					self.editor.setTextCursor(cursor)
+					# self.updating = False
+					self.editor.restoreScroll()
+					self.editor.updatingCursor = False
+					self.editor._updateExtraSelections() # for background line color
+			
+		
 		if(frameNumber != self.currentFrame):
 			# self.currentFrame = frameNumber
 			print('changing frame from text cursor', frameNumber, self.currentFrame)
@@ -830,7 +1177,7 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		
 		
 		if lines is None : lines = self.editor.lines
-		frame = {}
+		frame = {'attack':{}, 'bbox':{}}
 		old_frames = self.frames
 		self.frames = []
 		
@@ -852,6 +1199,7 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		
 		i = 0
 		nF = 0 # number of Frame
+		collisionIndex = 0
 		for line in lines:
 			
 			pLine = ParsedLine(line)
@@ -866,6 +1214,7 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				continue
 			
 			elif(part == 'anim'):
+				collisionIndex = 0
 				animName = pLine.next()
 				if animName is None: # need at least one space, so that we don't process line "anim" because user might be typing "animheight" 
 					continue
@@ -952,7 +1301,7 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			elif(part == '@script'):
 				if('@end_script' not in line):
 					isInScript = True
-			elif(part == '@end_script'):
+			elif('@end_script' in line): # not necessarily at line start, e.g. "}	@end_script"
 				isInScript = False
 				
 			if isInScript: continue
@@ -961,11 +1310,21 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				path = pLine.next()
 				if path != None:
 					frame['frame'] = path
+					frame['index'] = len(self.frames)
 					self.frames.append(frame)
-					frame = {}
+					frame = {'attack':{}, 'bbox':{}}
+
 				nF +=1
+				
+			elif(part == 'collision.index'):
+				collisionIndex = parseInt(pLine.next())
+			
 			elif(part == '{attack'):
-				frame['attack'] = old_frames[nF]['attack']
+				#NEED_TO_BE_ADAPTED (probably useless / without any effect now)
+				# frame['attack'] = old_frames[nF]['attack']
+				pass
+				# continue
+				
 			elif(part == 'delay'):
 				#delay = int(float(pLine.next()))
 				delay = parseInt(pLine.next())
@@ -973,10 +1332,10 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				frame['delay'] = delay
 				
 			elif(part == 'dropv'):
-				if 'attack' not in frame:
-					frame['attack'] = AttackBox()
-					frame['attack'].phantom = True
-				abox = frame['attack']
+				if collisionIndex not in frame['attack']:
+					frame['attack'][collisionIndex] = AttackBox()
+					frame['attack'][collisionIndex].phantom = True
+				abox = frame['attack'][collisionIndex]
 				data = []
 				while(pLine.next() != None):
 					data.append(parseFloat(pLine.current()))
@@ -984,20 +1343,20 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				
 				
 			elif(part == 'hitfx'): # TODO
-				if 'attack' not in frame:
-					frame['attack'] = AttackBox()
-					frame['attack'].phantom = True
-				abox = frame['attack']
+				if collisionIndex not in frame['attack']:
+					frame['attack'][collisionIndex] = AttackBox()
+					frame['attack'][collisionIndex].phantom = True
+				abox = frame['attack'][collisionIndex]
 				data = []
 				while(pLine.next() != None):
 					data.append(pLine.current())
 				abox.loadLegacy('hitfx', data)
 				
 			elif(part == 'hitflash'): # TODO
-				if 'attack' not in frame:
-					frame['attack'] = AttackBox()
-					frame['attack'].phantom = True
-				abox = frame['attack']
+				if collisionIndex not in frame['attack']:
+					frame['attack'][collisionIndex] = AttackBox()
+					frame['attack'][collisionIndex].phantom = True
+				abox = frame['attack'][collisionIndex]
 				data = []
 				while(pLine.next() != None):
 					data.append(pLine.current())
@@ -1023,12 +1382,12 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				if len(commandParts) == 1: # bbox legacy/main command (with multiple/all params)
 					# print('bbox', pLine.getNumberOfParts() )
 					# if(pLine.getNumberOfParts() > 7): continue
-					frame['bbox'] = BBox(pLine)
+					frame['bbox'][collisionIndex] = BBox(pLine)
 					
 				else: # e.g., bbox.position.x
-					if 'bbox' not in frame:
-						frame['bbox'] = BBox()
-					bbox = frame['bbox']
+					if collisionIndex not in frame['bbox']:
+						frame['bbox'][collisionIndex] = BBox()
+					bbox = frame['bbox'][collisionIndex]
 					
 					try:
 						if commandParts[1] == 'position':
@@ -1046,10 +1405,10 @@ class EntityEditorWidget(QtWidgets.QWidget):
 								bbox.height = parseInt(pLine.next())
 								bbox.ogLineHeight = pLine
 							elif commandParts[2] == 'z':
-								if commandParts[3] == '1':
+								if commandParts[3] == '1' or commandParts[3] == 'background' :
 									bbox.z1 = parseInt(pLine.next())
 									bbox.ogLineZ1 = pLine
-								elif commandParts[3] == '2':
+								elif commandParts[3] == '2'  or commandParts[3] == 'foreground':
 									bbox.z2 = parseInt(pLine.next())
 									bbox.ogLineZ2 = pLine
 						
@@ -1058,11 +1417,11 @@ class EntityEditorWidget(QtWidgets.QWidget):
 						pass
 					
 				
-			elif(part != 'attackone' and (part.startswith('attack') or part.startswith('shock') or part.startswith('burn') or part.startswith('steal'))):
+			elif( part != 'attackone' and (part.startswith('attack') or part.startswith('blast') or part.startswith('freeze') or part.startswith('shock') or part.startswith('burn') or part.startswith('steal'))):
 				
 				commandParts = part.split('.')
 				if len(commandParts) == 1: # attack legacy/main command (with multiple/all params)
-					if len(pLine) > 6:
+					if len(pLine) > 1: # at least one param
 						data = [part]
 						while(pLine.next() != None):
 							data.append(parseInt(pLine.current()))
@@ -1073,15 +1432,17 @@ class EntityEditorWidget(QtWidgets.QWidget):
 							data.append(0)
 						# x, y, w, h, d, p, block, noflash, pause, z
 						
-						if('attack' in frame): # for example if dropv defined before attack
-							frame['attack'].overwriteWith(data)
+						if(collisionIndex in frame['attack']): # for example if dropv defined before classic attack
+							frame['attack'][collisionIndex].overwriteWith(data)
+							if frame['attack'][collisionIndex].ogLine == None:
+								frame['attack'][collisionIndex].ogLine = pLine
 						else:
-							frame['attack'] = AttackBox(data)
-						frame['attack'].ogLine = pLine
+							frame['attack'][collisionIndex] = AttackBox(data)
+							frame['attack'][collisionIndex].ogLine = pLine
 				else: # e.g., abox.position.x
-					if 'attack' not in frame:
-						frame['attack'] = AttackBox()
-					abox = frame['attack']
+					if(collisionIndex not in frame['attack']):
+						frame['attack'][collisionIndex] = AttackBox()
+					abox = frame['attack'][collisionIndex]
 					
 					
 					try:
@@ -1184,12 +1545,33 @@ class EntityEditorWidget(QtWidgets.QWidget):
 					data.append(parseInt(pLine.current()))
 				
 				frame['platform'] = Platform(data)
-
 				
+				if (old_frames != None and nF < len(old_frames)):
+					oldFrame = old_frames[nF]
+					if 'platform' in oldFrame:
+						if hasattr(frame['platform'], 'xOffset'):
+							frame['platform'].wall = oldFrame['platform'].wall
+							frame['platform'].xOffset = oldFrame['platform'].xOffset
+							frame['platform'].yOffset = oldFrame['platform'].yOffset
+							
+							# WARNING might need to call : 
+							# frame['platform'].platformUpdated()
+
+			
+			elif(part == 'nodrawmethod'):
+				frame['nodrawmethod'] = True
+			
 			elif(part == 'drawmethod'):
 				prop = pLine.next()
 				if prop != None:
-					frame['drawmethod_' + prop] = pLine.next()
+					if prop == 'scale':
+						x = pLine.next()
+						frame['drawmethod_scalex'] = x
+						y = pLine.next()
+						if y == None: y = x
+						frame['drawmethod_scaley'] = y
+					else:
+						frame['drawmethod_' + prop] = pLine.next()
 					
 			
 			elif(part == 'move'):
@@ -1223,12 +1605,12 @@ class EntityEditorWidget(QtWidgets.QWidget):
 	'''
 		Recreate the animation editor text with the current animation data
 	'''
-	def rebuildText(self, expanded=False, updateEditor=True):
+	def rebuildText(self, expanded=False, updateEditor=True, logInfo=None):
 		
 		print('REBUILDING ANIM TEXT')
 		
 		legacy = settings.get_option('misc/legacy_commands', False)
-		compactBlocks = settings.get_option('misc/compact_boxes_blocks', False)
+		compactBlocks = settings.get_option('misc/compact_boxes_blocks', defaultCompact)
 		if(not compactBlocks):
 			expanded = True # force expanded
 		
@@ -1237,10 +1619,22 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			self.editor.saveScroll()
 		lines = self.editor.lines # self.editor.text.split('\n')
 		
+		
+		if len(self.undoStates) == 0:
+			self.undoStates.append(list(lines))
+		else :
+			previousSave = self.undoStates[-1]
+			if(previousSave != lines):
+			
+				self.undoStates.append(list(lines))
+		
 		filled = {'bbox':False, 'attack':False, 'delay':False, 'offset':False, 'range':False, 'rangez':False, 'platform':False, 'bind':False}
 		
 		newLines = []
 		currentFrame = 0
+		collisionIndex = 0
+		collisionWasChangedToNonZero = False
+		
 		inLineScript = False
 		inBBox = False
 		inAbox = False
@@ -1273,7 +1667,9 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			
 			
 			if(bindingMaskIdentifier != None and pLine.line.lstrip().startswith(bindingMaskIdentifier)):
-				
+				if(currentFrame >= len(self.anim.frames) or 'bind' not in self.anim[currentFrame]):
+					newLines.append(line)
+					continue
 				bindData = self.anim[currentFrame]['bind']
 				newLines.append(bindData.getText(pLineMask))
 				filled['bind'] = True
@@ -1287,11 +1683,21 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			elif(part == '@script'):
 				if('@end_script' not in line):
 					inLineScript = True
-			elif(part == '@end_script'):
+			elif('@end_script' in line): # not necessarily at line start, e.g. "}	@end_script"
 				inLineScript = False
+				
+			elif inLineScript:
+				pass
+				
+				
+			elif(part == 'collision.index'):
+				collisionIndex = parseInt(pLine.next())
+				continue
 				
 			elif(part == '{attack'):
 				if(not expanded):
+					continue # 0.6.0
+					filled['attack_' +str(collisionIndex)] = True
 					filled['attack'] = True # so as to not trigger automatic add of attack in frame section
 				else:
 					# not filling attack will trigger automatic add of attack in frame section
@@ -1300,7 +1706,15 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				
 				# print('rebuild text', '{attack...')
 				
-			elif(not inLineScript and part == 'frame'):
+			elif(part == '{bbox'):
+				continue
+				
+			elif(not inLineScript and part == 'frame'):   #  **********       FRAME        *******
+				# Incomplete frame line (no path, still being typed) or no matching parsed frame :
+				# keep the line as-is to stay in sync with processLines, which skips it
+				if(currentFrame >= len(self.anim.frames) or pLine.next() is None):
+					newLines.append(line)
+					continue
 				# Before ending current frame, fill new data (from frameEditor)
 				if not filled['offset'] and 'offset' in self.anim[currentFrame]:
 					x, y = self.anim[currentFrame]['offset']
@@ -1309,13 +1723,43 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				if not filled['delay'] and 'delay' in self.anim[currentFrame]:
 					delay = self.anim[currentFrame]['delay']
 					newLines.append('	delay ' + str(delay))
-					
-				if not filled['bbox'] and 'bbox' in self.anim[currentFrame]:
-					bbox = self.anim[currentFrame]['bbox']
-					newLines.append(bbox.getText())
-					#newLines.append('\tbbox ' + ' '.join(map(str, self.anim[currentFrame]['bbox'].getParams())) )
-				if not filled['attack'] and 'attack' in self.anim[currentFrame]:
-					newLines.append(self.anim[currentFrame]['attack'].getText())
+				
+				addedACollision = False
+				for collisionIndex in self.anim[currentFrame]['bbox']:
+					if ('bbox_' + str(collisionIndex)) not in filled:
+						addedACollision = True
+						bbox = self.anim[currentFrame]['bbox'][collisionIndex]
+						if collisionIndex != 0 or collisionWasChangedToNonZero:
+							newLines.append('	collision.index ' + str(collisionIndex)+ ' #bbox')
+							collisionWasChangedToNonZero = True
+							
+						if expanded:
+							newLines.extend(bbox.getText().split('\n'))
+						else:
+							newLines.append(bbox.getCompactText())
+						#newLines.append('\tbbox ' + ' '.join(map(str, self.anim[currentFrame]['bbox'].getParams())) )
+				if addedACollision: # reset collisionIndex to avoid implicit mess
+					collisionIndex = 0
+				
+				
+				# ATTACKS
+				addedACollision = False
+				for collisionIndex in self.anim[currentFrame]['attack']:
+					# QtWidgets.QMessageBox.warning(self, _('Please restart'), str(currentFrame) + ' collison : ' + str(collisionIndex))
+					if ('attack_' + str(collisionIndex)) not in filled:
+						addedACollision = True
+						if collisionIndex != 0 or collisionWasChangedToNonZero:
+							newLines.append('	collision.index ' + str(collisionIndex) + ' #attack')
+							collisionWasChangedToNonZero = True
+						
+						if expanded:
+							# if(logInfo == 'validateChanges') : logging.debug('collisionAdd ' + self.anim[currentFrame]['attack'][collisionIndex].getText() )
+							newLines.extend(self.anim[currentFrame]['attack'][collisionIndex].getText().split('\n'))
+						else:
+							newLines.append(self.anim[currentFrame]['attack'][collisionIndex].getCompactText())
+						# newLines.extend(self.anim[currentFrame]['attack'][collisionIndex].getText().split('\n'))
+				if addedACollision: # reset collisionIndex to avoid implicit mess
+					collisionIndex = 0
 					
 				if not filled['platform'] and 'platform' in self.anim[currentFrame]:
 					platform = self.anim[currentFrame]['platform']
@@ -1338,12 +1782,20 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				filled = {'bbox':False, 'attack':False, 'delay':False, 'offset':False, 'range':False, 'rangez':False, 'platform':False, 'bind':False}
 				
 			elif(part == 'offset'):
+				if(currentFrame >= len(self.anim.frames)):
+					# QtWidgets.QMessageBox.warning(self, _('Error'), _('An offset was declared after the last frame'))
+					newLines.append(line)
+					continue
+					# return
 				filled[part] = True
 				pLine.next()
 				newParts = ' '.join(map(str, self.anim[currentFrame]['offset']))
 				pLine.parts[pLine.pos:] = newParts
 
 			elif(part == 'delay'):
+				if(currentFrame >= len(self.anim.frames)):
+					newLines.append(line)
+					continue
 				filled[part] = True
 				pLine.next()
 				if 'delay' in self.anim[currentFrame]:
@@ -1356,41 +1808,58 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				continue
 					
 			elif(part.startswith('bbox')):
+				if(currentFrame >= len(self.anim.frames)):
+					newLines.append(line)
+					continue
 				inBBox = True
-				filled['bbox'] = True
+				filled['bbox_' + str(collisionIndex)] = True
 				pLine.next()
 				
-				if 'bbox' in self.anim[currentFrame]: # If not, means added directly in animation text editor
-					if self.anim[currentFrame]['bbox'].delete : # Set to DELETE from FramePropertiesEditor
-						del self.anim[currentFrame]['bbox']
+				if collisionIndex in self.anim[currentFrame]['bbox']: # If not, means added directly in animation text editor
+					if self.anim[currentFrame]['bbox'][collisionIndex].delete : # Set to DELETE from FramePropertiesEditor
+						del self.anim[currentFrame]['bbox'][collisionIndex]
 						continue
 					
-					newLines.extend(self.anim[currentFrame]['bbox'].getText().split('\n'))
+					# basically do always that (explicit collision.index) if collision index was once changed.
+					if collisionIndex != 0 or collisionWasChangedToNonZero:
+						newLines.append('	collision.index ' + str(collisionIndex) + ' #bbox')
+						collisionWasChangedToNonZero = True
+						
+					if expanded:
+						newLines.extend(self.anim[currentFrame]['bbox'][collisionIndex].getText().split('\n'))
+					else:
+						newLines.extend(self.anim[currentFrame]['bbox'][collisionIndex].getCompactText().split('\n'))
 					continue
 					#newParts = ' '.join(map(str, self.anim[currentFrame]['bbox'].getParams()))
 					#newParts = re.split('( )', newParts)
 					#pLine.parts[pLine.pos:] = newParts
 				#print(parts)
 				
-			elif(part != 'attackone' and (part.startswith('attack') or part.startswith('shock') or part.startswith('burn') or part.startswith('steal'))): #  and len(pLine) > 6
+			elif(self.currentAnim != 'header' and part != 'attackone' and part != 'attackthrottle' and (part.startswith('attack') or part.startswith('shock') or part.startswith('blast') or part.startswith('freeze') or part.startswith('burn') or part.startswith('steal'))): #  and len(pLine) > 6
 				if(currentFrame >= len(self.anim.frames)):
 					QtWidgets.QMessageBox.warning(self, _('Error'), _('An attackbox was declared after the last frame'))
-					return
+					return newLines
 				
 				inAbox = True
-				filled['attack'] = True
+				# Le soucis c'est que là, collisionIndex peut être à 1 alors qu'on arrive sur du implicit 0
+				filled['attack_' + str(collisionIndex)] = True
 				pLine.next()
 
-				if 'attack' in self.anim[currentFrame]: # If not, means added directly in animation text editor
-					if self.anim[currentFrame]['attack'].delete: # Set to DELETE from FramePropertiesEditor
-						del self.anim[currentFrame]['attack']
+				if collisionIndex in self.anim[currentFrame]['attack']: # If not, means added directly in animation text editor
+					print('DELETED',self.anim[currentFrame]['attack'][collisionIndex].delete)
+					if self.anim[currentFrame]['attack'][collisionIndex].delete: # Set to DELETE from FramePropertiesEditor
+						del self.anim[currentFrame]['attack'][collisionIndex]
 						continue
 
 					# newLines.extend(self.anim[currentFrame]['attack'].getText().split('\n'))
+					if collisionIndex != 0 or collisionWasChangedToNonZero:
+						newLines.append('	collision.index ' + str(collisionIndex) + ' #attack')
+						collisionWasChangedToNonZero = True
+					
 					if expanded:
-						newLines.extend(self.anim[currentFrame]['attack'].getText().split('\n'))
+						newLines.extend(self.anim[currentFrame]['attack'][collisionIndex].getText().split('\n'))
 					else:
-						newLines.extend(self.anim[currentFrame]['attack'].getCompactText().split('\n'))
+						newLines.extend(self.anim[currentFrame]['attack'][collisionIndex].getCompactText().split('\n'))
 					continue
 				
 					#newParts = ' '.join(map(str, self.anim[currentFrame]['attack']))
@@ -1400,14 +1869,20 @@ class EntityEditorWidget(QtWidgets.QWidget):
 					#pLine.parts = newParts
 					
 			elif part == 'platform':
+				if(currentFrame >= len(self.anim.frames)):
+					newLines.append(line)
+					continue
 				filled['platform'] = True
 				if 'platform' in self.anim[currentFrame]:
 					newLines.extend(self.anim[currentFrame]['platform'].getText().split('\n'))
 					continue
 				
 			elif(part == 'range'):
+				if(len(self.anim.frames) == 0 or 'range' not in self.anim[0]):
+					newLines.append(line)
+					continue
 				filled[part] = True
-				
+
 				if('deleteRange' in self.anim[0] and self.anim[0]['deleteRange'] == True):
 					del self.anim[0]['range']
 					del self.anim[0]['deleteRange'] # not needed but just in case
@@ -1418,8 +1893,11 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				pLine.parts[pLine.pos:] = newParts
 				
 			elif(part == 'rangez'):
+				if(len(self.anim.frames) == 0 or 'rangez' not in self.anim[0]):
+					newLines.append(line)
+					continue
 				filled[part] = True
-				
+
 				if('deleteRangez' in self.anim[0] and self.anim[0]['deleteRangez'] == True):
 					del self.anim[0]['rangez']
 					del self.anim[0]['deleteRangez'] # not needed but just in case
@@ -1438,8 +1916,13 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		if(updateEditor):
 			
 			self.editor.lines = newLines #self.editor.setPlainText('\n'.join(newLines))
+			self.collapsePropGroup()
 			self.editor.restoreScroll()
+			
 			self.updating = False
+			
+		# if(logInfo == 'validateChanges'):
+		# 	logging.debug(newLines)
 			
 		return newLines
 		
@@ -1479,12 +1962,14 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		if self.currentAnim is not None:
 			#self.rebuildText() # WARNING
 			# print(self.editor.lines)
-			compactBlocks = settings.get_option('misc/compact_boxes_blocks', False)
+			compactBlocks = settings.get_option('misc/compact_boxes_blocks', defaultCompact)
 			if compactBlocks:
-				expandedLines = self.rebuildText(True, False)
+				expandedLines = self.rebuildText(True, False, 'validateChanges')
 			else:
 				expandedLines = list(self.editor.lines)
 			del self.dicData[self.currentAnim]['lines'][:]
+			# print('UMPASSI', self.dicData[self.currentAnim]['lines'])
+			# print('UMPATRA', expandedLines)
 			self.dicData[self.currentAnim]['lines'].extend(expandedLines )
 
 	
@@ -1507,8 +1992,13 @@ class FrameEditor(QtWidgets.QWidget):
 		
 		self.showRulers = settings.get_option('entity/show_rulers', False )
 		self.showGuidelines = settings.get_option('entity/show_guidelines', False )
+		self.previewMove = settings.get_option('entity/preview_move', True )
+		self.parent.animMemoryMode = settings.get_option('entity/anim_memory_mode', 'restore_last' )
 		
 		view = ImageWidget(self)
+		
+		view.viewport().installEventFilter(self);
+		
 		scene = FrameScene(self)
 		scene.setSceneRect(-1000, -1000, 2000.0, 2000.0)
 		self.scene = scene
@@ -1554,6 +2044,9 @@ class FrameEditor(QtWidgets.QWidget):
 		# self.buttonBar.setContentsMargins(20, 20, 20, 20)
 		self.buttonBar.setStyleSheet("QLabel, QToolButton { margin-top:5px;}  QToolBar { margin:5px;border-top:1px solid #c9c9c9; }");
 		
+		self.focusSwitcher = FocusSwitcher(self.parent, 'Focus')
+		# self.buttonBar.addWidget(self.focusSwitcher)
+		
 		self.label = QtWidgets.QLabel('Frame 0')
 		self.buttonBar.addWidget(self.label)
 		self.buttonBar.addSeparator()
@@ -1567,6 +2060,7 @@ class FrameEditor(QtWidgets.QWidget):
 		# QtGui.QIcon.fromTheme('zoom-in')
 		
 		self.buttonBar.addAction(icon, None, self.graphicView.zoomIn)
+		# self.buttonBar.addAction(icon, None, self.parent.collapsePropGroup)
 		
 		icon = QtGui.QImage('icons/zoom-out.svg')
 		if(theme == "Dark"): icon.invertPixels()
@@ -1656,6 +2150,27 @@ class FrameEditor(QtWidgets.QWidget):
 		self.toggleGuidelinesAction.setChecked(settings.get_option('entity/show_guidelines', False ))
 		
 		
+		self.togglePreviewMoveAction = self.buttonBar.addAction('Preview "move" command', self.togglePreviewMove)
+		self.togglePreviewMoveAction.setCheckable(True)
+		self.togglePreviewMoveAction.setChecked(settings.get_option('entity/preview_move', True ))
+		
+		
+		
+		self.animationMemeoryAction = self.buttonBar.addAction('Anim memory mode', self.toggleVisualPropertyMode)
+		self.animationMemeoryMenu = QtWidgets.QMenu()
+		self.animationMemeoryAction.setMenu(self.animationMemeoryMenu)
+		self.buttonBar.widgetForAction(self.animationMemeoryAction).setPopupMode(QtWidgets.QToolButton.InstantPopup)
+		
+		actionGroup = QtWidgets.QActionGroup(self)
+		for mode in [('reset_idle', 'Reset to idle'), ('restore_last', 'Restore entity last anim'), ('match', 'Match with previous entity') ]:
+			
+			a = self.animationMemeoryMenu.addAction(mode[1], self.modifyAnimationMemory)
+			a.setData(mode[0])
+			a.setCheckable(True)
+			if mode[0] == self.parent.animMemoryMode: a.setChecked(True)
+			actionGroup.addAction(a)
+		
+		
 		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("F5", "Refresh")), self, self.reloadSprites)
 		#QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("F5", "Refresh")), self, self.parent.tmp)
 		
@@ -1671,11 +2186,21 @@ class FrameEditor(QtWidgets.QWidget):
 		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/set_body_box', 'B')), self.graphicView,  lambda:self.setMode('bbox'), context=QtCore.Qt.WidgetShortcut)
 		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/set_attack_box', 'A')), self.graphicView,  lambda:self.setMode('attack'), context=QtCore.Qt.WidgetShortcut)
 		
+		
+		QtWidgets.QShortcut(QtGui.QKeySequence('E'), self.graphicView,  self.extractBBox, context=QtCore.Qt.WidgetShortcut)
+		
+		
+		
+		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/set_offset', 'O')), self.graphicView,  lambda:self.setMode('offset'), context=QtCore.Qt.WidgetShortcut)
+		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/set_onionSkin', 'N')), self.graphicView,  self.toggleOnionSkin, context=QtCore.Qt.WidgetShortcut)
+		
 		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/play_animation', 'P')), self.graphicView,  self.playFrames, context=QtCore.Qt.WidgetShortcut)
 		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/play_animation_global', 'Ctrl+P')), self.parent, self.playFrames, context=QtCore.Qt.ApplicationShortcut)
 		
 		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/next_frame_global', 'Ctrl+Right')), self.parent, self.nextFrame, self.nextFrame)
 		QtWidgets.QShortcut(QtGui.QKeySequence(settings.get_option('shortcuts/previous_frame_global', 'Ctrl+Left')), self.parent, self.previousFrame, self.previousFrame)
+		
+		
 		
 		
 		self.sounds = {}
@@ -1705,8 +2230,61 @@ class FrameEditor(QtWidgets.QWidget):
 		
 		self.guideLineX = 0
 		self.guideLineY = 0
+	
+	
+	def extractBBox(self):
+		print('extract bbox')
+		from gui.entity import bwwd_lib
 		
+		frame = self.getCurrentFrame()
 		
+		path = os.path.join(EntityEditorWidget.ROOT_PATH, frame['frame'])
+		
+		x, y, w, h = bwwd_lib.extractBBox(path )
+		
+		collisionIndex = 0
+		
+		frame['bbox'][collisionIndex] = BBox([x-self.moveX_compound, y, w, h])
+		
+		self.loadFrame()
+	
+	
+# 	def eventFilter(self, source, e):
+# 		
+# 		if (e.type() == QtCore.QEvent.MouseMove and source is self.graphicView.viewport()):
+# 			self.graphicView.mouseMoveEvent(e)
+# 			return False
+# 			
+# 		return False
+	
+	def tmp2(self):
+		cursor = self.parent.editor.textCursor()
+		block = self.parent.editor.document().findBlock(cursor.selectionStart())
+		# block = self.parent.editor.document().findBlockByNumber(64)
+		block.setVisible(not block.isVisible())
+		
+		self.parent.editor.viewport().update()
+		self.parent.editor._lineNumberArea.update()
+		
+	def tmp3(self):
+		cursor = self.parent.editor.textCursor()
+		block = self.parent.editor.document().findBlock(cursor.selectionStart())
+		
+		for i in [5,10]:
+			i-=1
+			block = self.parent.editor.document().findBlockByNumber(i)
+			block.setVisible(not block.isVisible())
+			
+		self.parent.editor.viewport().update()
+		self.parent.editor._lineNumberArea.update()
+
+	
+	
+	def modifyAnimationMemory(self, mode=None):
+		if mode is None and self.sender() != None:
+			mode = self.sender().data()
+		self.parent.animMemoryMode = mode
+		settings.set_option('entity/anim_memory_mode', self.parent.animMemoryMode)
 		
 	def toggleRulers(self):
 		self.showRulers = self.toggleRulersAction.isChecked()
@@ -1725,6 +2303,14 @@ class FrameEditor(QtWidgets.QWidget):
 		else:
 			self.guideLineV.hide()
 			self.guideLineH.hide()
+		
+	def togglePreviewMove(self):
+		self.previewMove = self.togglePreviewMoveAction.isChecked()
+		settings.set_option('entity/preview_move', self.previewMove)
+		
+		if(not self.previewMove):
+			self.moveX_compound = 0
+			self.loadFrame()
 		
 		
 		
@@ -1818,6 +2404,7 @@ class FrameEditor(QtWidgets.QWidget):
 
 		
 	def endDraw(self, obj):
+		collisionIndex = 0
 		if self.mode == 'bbox' or self.mode == 'attack' or self.mode == 'range':
 			
 			frame = self.getCurrentFrame()
@@ -1826,18 +2413,21 @@ class FrameEditor(QtWidgets.QWidget):
 			
 			
 			if self.mode == 'bbox':
-				frame['bbox'] = BBox([x, y, w, h])
+				collisionIndex = self.propEditor.collisionIndexBody
+				frame['bbox'][collisionIndex] = BBox([x-self.moveX_compound, y, w, h])
 				
 			elif self.mode == 'range':
-				frame['range'] = [int(obj.rect().x()), int(obj.rect().x() + w)]
+				x = int(obj.rect().x()) -self.moveX_compound
+				frame['range'] = [x, x + int(w)]
 			else:
-				if('attack' in frame):
-					abox = frame['attack']
+				collisionIndex = self.propEditor.collisionIndexAttack
+				if(collisionIndex in frame['attack']):
+					abox = frame['attack'][collisionIndex]
 					
 				else:
 					abox = AttackBox()
-					frame['attack'] = abox
-				abox.data['position.x'] = x
+					frame['attack'][collisionIndex] = abox
+				abox.data['position.x'] = x-self.moveX_compound
 				abox.data['position.y'] = y
 				abox.data['size.x'] = w
 				abox.data['size.y'] = h
@@ -1848,7 +2438,7 @@ class FrameEditor(QtWidgets.QWidget):
 			x, y, w, h = int(obj.rect().x()+xOffset), int(obj.rect().y()+yOffset), int(obj.rect().width()), int(obj.rect().height())
 			
 			
-			frame['offset'] = [x, y]
+			frame['offset'] = [x-self.moveX_compound, y]
 			
 		if(self.resetVisualPropAction.isChecked()):
 			self.setMode('pos')
@@ -2165,7 +2755,7 @@ class FrameEditor(QtWidgets.QWidget):
 			else : # add new platform
 				xOffset = 0
 				yOffset = 0
-				platform = anim.getPlatform(frameNumber)
+				platform = anim.getPlatform(frameNumber, True)
 				anim[frameNumber]['platform'] = platform
 				wall = platform.getWall(xOffset, yOffset)
 				self.scene.addItem(wall)
@@ -2279,16 +2869,16 @@ class FrameEditor(QtWidgets.QWidget):
 		#print('offset', xOffset, yOffset)
 		
 		
-		
-		if('move' in frame):
-			self.moveX = frame['move']
-		
-		if(frameJump > 0):
-			self.moveX_compound += self.moveX * frameJump
-		else:
-			self.moveX_compound += self.moveX * frameJump
+		if (self.previewMove):
+			if('move' in frame):
+				self.moveX = frame['move']
 			
-		xOffset -= self.moveX_compound
+			if(frameJump > 0):
+				self.moveX_compound += self.moveX * frameJump
+			else:
+				self.moveX_compound += self.moveX * frameJump
+				
+			xOffset -= self.moveX_compound
 		
 		if frame['frame'] not in self.parent.pixmapCache:
 			options = {}
@@ -2303,6 +2893,9 @@ class FrameEditor(QtWidgets.QWidget):
 			# xOffset *= -1
 			xOffset = int(image.width()) - xOffset
 			pass
+			
+		if flipY == 1:
+			yOffset = int(image.height()) - yOffset
 		
 		if scaleX != 1 or scaleY != 1:
 			#image = image.scaled(image.width() * scaleX, image.height() * scaleY)
@@ -2327,24 +2920,32 @@ class FrameEditor(QtWidgets.QWidget):
 		
 
 		if(self.mode != 'bbox' or not self.resetVisualPropAction.isChecked()):
-	
-			x, y, w, h= anim.getBBox(frameNumber).getParams()[0:4]
-			print('bbox',anim.getBBox(frameNumber))
-			if x != None:
-				#print(x,xOffset,y,yOffset,w,h)
-				bbox = QtWidgets.QGraphicsRectItem(x-xOffset,y-yOffset,w,h)
-				bbox.setBrush(QtGui.QBrush(QtCore.Qt.blue))
-				bbox.setOpacity(0.3)
-				
-				if self.disableBoxBorderAction.isChecked():
-					pen = QtGui.QPen()
-					pen.setWidth(0)
-					bbox.setPen(pen)
-				self.scene.addItem(bbox)
 			
-		if(self.mode != 'attack' or not self.resetVisualPropAction.isChecked()):
-			if 'attack' in anim[frameNumber]:
-				abox = anim[frameNumber]['attack']
+			print('bbox',anim.getBBox(frameNumber))
+			for bboxData in anim.getBBox(frameNumber):
+	
+				x, y, w, h= bboxData.getParams()[0:4]
+				
+				if x != None:
+					#print(x,xOffset,y,yOffset,w,h)
+					bbox = QtWidgets.QGraphicsRectItem(x-xOffset,y-yOffset,w,h)
+					bbox.setBrush(QtGui.QBrush(QtCore.Qt.blue))
+					bbox.setOpacity(0.3)
+					
+					if self.disableBoxBorderAction.isChecked():
+						pen = QtGui.QPen()
+						pen.setWidth(0)
+						bbox.setPen(pen)
+					self.scene.addItem(bbox)
+			
+		# if(self.mode != 'attack' or not self.resetVisualPropAction.isChecked()):
+		if(True):
+			ignoreCollision = -1
+			if(self.mode == 'attack' and self.resetVisualPropAction.isChecked()):
+				ignoreCollision = self.propEditor.collisionIndexAttack
+			
+			for abox in anim.getABox(frameNumber, ignoreCollision):
+				
 				#while len(anim[frameNumber]['attack']) < 5:
 					#anim[frameNumber]['attack'].append(0)
 				x, y, w, h = abox.getParams()[1:5]
@@ -2361,10 +2962,13 @@ class FrameEditor(QtWidgets.QWidget):
 				
 		xMin, xMax = anim.getRange(0)
 		if xMin != None:
+			xMin -= self.moveX_compound
+			xMax -= self.moveX_compound
 			
 			if(settings.get_option('entity/visualize_rangez', True)):
 				# the 3d box
-				self.scene.addItem(anim.getRange3DBox().getWall(0, 0))
+				
+				self.scene.addItem(anim.getRange3DBox().getWall(-self.moveX_compound, 0))
 			else:
 				# the flat box
 				rangeBox = QtWidgets.QGraphicsRectItem(xMin,-10,xMax-xMin,20)
@@ -2375,9 +2979,10 @@ class FrameEditor(QtWidgets.QWidget):
 					pen.setWidth(0)
 					rangeBox.setPen(pen)
 				self.scene.addItem(rangeBox)
+				
 			
 			
-			
+		# QtWidgets.QMessageBox.warning(self, _('Please restart'), _('Platform' + str(frameNumber) + ' ' + str('platform' in anim[frameNumber])))
 
 		if 'platform' in anim[frameNumber]:
 			platform = anim[frameNumber]['platform']
@@ -2386,12 +2991,13 @@ class FrameEditor(QtWidgets.QWidget):
 			
 			wall = platform.getWall(xOffset, yOffset)
 			self.scene.addItem(wall)
+			
 			for dot in wall.dots:
 				self.scene.addItem(dot)
 				#dot.hide()
 			
-		self.scene.addRect(-5,-5,10,10) #offset
-		self.scene.addRect(-1,-1,2,2) #offset precise
+		self.scene.addRect(-5+self.moveX_compound,-5,10,10) #offset
+		self.scene.addRect(-1+self.moveX_compound,-1,2,2) #offset precise
 		self.propEditor.loadData(frame, anim)
 		self.bindingEditor.loadData(frame)
 		
@@ -2586,6 +3192,10 @@ class FrameEditor(QtWidgets.QWidget):
 		self.onionSkinAction.setChecked(True)
 		self.setOnionSkin(None, False)
 		
+	def toggleOnionSkin(self):
+		self.onionSkinAction.setChecked( not self.onionSkinAction.isChecked())
+		self.setOnionSkin()
+		
 	def setOnionSkin(self, frameNumber=None, erase=True):
 		if not self.onionSkinAction.isChecked(): # Just unchecked
 			self.onionSkin = None
@@ -2665,6 +3275,8 @@ class FrameScene(QtWidgets.QGraphicsScene):
 		self.mainEditor = mainEditor
 		self.setMode('pos')
 		self.dragRect = None
+		self.cancelDraw = False
+		# self.setMouseTracking(True)
 		
 		
 	def setMode(self, mode):
@@ -2672,17 +3284,27 @@ class FrameScene(QtWidgets.QGraphicsScene):
 		
 		
 	def contextMenuEvent(self, e):
+		# QtWidgets.QGraphicsScene.mousePressEvent(self, e)
+		# return 
 		item = self.itemAt(e.scenePos(), QtGui.QTransform())
 		if item is not None:
 			group = item.group()
 			if group is not None:
 				item = group
+		
+		
+		
 				
 		popMenu = QtWidgets.QMenu()
 		if(item in ( self.mainEditor.guideLineH, self.mainEditor.guideLineV)):
 			setOnTop = popMenu.addAction( _("Set on top"))
 			setBehind = popMenu.addAction( _("Set behind"))
 			
+		else :
+			self.cancelDraw = False
+			return
+		
+		self.cancelDraw = True
 		action = popMenu.exec_(e.screenPos())
 		
 		if action == None:
@@ -2692,10 +3314,40 @@ class FrameScene(QtWidgets.QGraphicsScene):
 			item.setZValue(999999)
 		elif action == setBehind:
 			item.setZValue(0)
+		
+		return True
 			
 	
 	def mousePressEvent(self, e):
+		
+		if(self.cancelDraw):
+			self.cancelDraw = False
+			return
+		
+		
 		QtWidgets.QGraphicsScene.mousePressEvent(self, e)
+		
+		modifiers = QtWidgets.QApplication.keyboardModifiers()
+		if modifiers == QtCore.Qt.ShiftModifier:
+			self.mainEditor.setMode('bbox')
+			# self.mainEditor.graphicView.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+			# self.mainEditor.cursorEditVisualProperty = True
+			# self.mode = 'attack'
+		elif modifiers == QtCore.Qt.ControlModifier:
+			self.mainEditor.setMode('attack')
+			# self.mainEditor.graphicView.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+			# self.mainEditor.cursorEditVisualProperty = True
+			# self.mode = 'bbox'
+		
+		if(e.button() == QtCore.Qt.RightButton):
+			if self.mainEditor.previousCursorMode not in ['attack, bbox', 'range']:
+				self.mainEditor.previousCursorMode = 'bbox'
+			self.mainEditor.setMode(self.mainEditor.previousCursorMode)
+			self.mainEditor.graphicView.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+			self.mainEditor.cursorEditVisualProperty = True
+			# return 
+			
+		
 		
 		if not self.mainEditor.cursorEditVisualProperty:
 			return
@@ -2728,6 +3380,10 @@ class FrameScene(QtWidgets.QGraphicsScene):
 		self.mainEditor.window().statusBar().showMessage(str((round(e.scenePos().x()), round( e.scenePos().y()))), 2000)
 		QtWidgets.QGraphicsScene.mouseMoveEvent(self, e)
 		
+		if(self.cancelDraw):
+			self.mainEditor.cursorEditVisualProperty = False
+			self.cancelDraw = False
+		
 		if not self.mainEditor.cursorEditVisualProperty:
 			return
 		
@@ -2747,17 +3403,43 @@ class FrameScene(QtWidgets.QGraphicsScene):
 		
 		
 	def mouseReleaseEvent(self, e):
-		QtWidgets.QGraphicsScene.mouseMoveEvent(self, e)
+		QtWidgets.QGraphicsScene.mouseReleaseEvent(self, e)
 		
+		if not self.mainEditor.cursorEditVisualProperty or self.mode == 'platform':
+			
+			platform = self.mainEditor.parent.anim.getPlatform(self.mainEditor.parent.currentFrame)
+			# QtWidgets.QMessageBox.warning(self.mainEditor, _('TMP'), str(self.mainEditor.parent.currentFrame) + ' ' + str(platform) + ' ' + str(platform != None) + ' ' + str( platform != None and platform.wall != None))
+			
+			# if platform != None and platform.wall == None:
+			# 	pass
+				# temporary fix platform update
+				# self.mainEditor.loadFrame()
+				# platform = self.mainEditor.parent.anim.getPlatform(self.mainEditor.parent.currentFrame)
+			
+			if platform != None and platform.wall != None:
+				# try:
+				platform.platformUpdated()
+				self.mainEditor.parent.rebuildText()
+				# except RuntimeError:
+					# pass
+		
+		
+		
+		
+		
+		
+				
 		if not self.mainEditor.cursorEditVisualProperty:
 			return
+		
+		
+		
 		
 		
 		if self.mode == 'pos':
 			return
 		if self.mode == 'platform':
-			self.mainEditor.parent.anim.getPlatform().platformUpdated()
-			self.mainEditor.parent.rebuildText()
+			
 			return
 		self.mainEditor.endDraw(self.dragRect)
 		self.dragRect = None
@@ -2847,6 +3529,40 @@ class ImageWidget(QtWidgets.QGraphicsView):
 		#print(e.orientation())
 		
 		delta = e.angleDelta().y()
+		print('delta', delta)
+		
+		modifiers = QtWidgets.QApplication.keyboardModifiers()
+		if modifiers == QtCore.Qt.ShiftModifier:
+			
+			return
+		elif modifiers == QtCore.Qt.ControlModifier:
+			main = self.parent.parent
+			if(delta < 0):
+				if main.currentFrame >= len(main.anim)-1:
+					main.currentFrame = 0
+				else:
+					main.currentFrame+= 1
+			else:
+				if main.currentFrame <= 0:
+					main.currentFrame = len(main.anim) -1
+				else:
+					main.currentFrame-= 1
+
+			self.parent.loadFrame(main.currentFrame)
+
+			nIndex = main.frameViewer.model.createIndex(main.currentFrame, 0) 
+			main.updating = True
+			main.frameViewer.dontAutoFocus = True
+			main.frameViewer.setCurrentIndex(nIndex)
+			main.frameViewer.dontAutoFocus = False
+			main.updating = False
+					
+
+			return
+		
+		
+		if(delta == 0): return
+
 		self.zoomFunction(delta)
 
 		

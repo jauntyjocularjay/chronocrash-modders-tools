@@ -81,4 +81,4 @@ class HTMLDelegate(QStyledItemDelegate):
         #  bad long (multiline) strings processing doc.setTextWidth(options.rect.width())
         doc.setHtml(options.text)
         return QSize(int(doc.idealWidth()),
-                     QStyledItemDelegate.sizeHint(self, option, index).height())
+                     int(QStyledItemDelegate.sizeHint(self, option, index).height()))

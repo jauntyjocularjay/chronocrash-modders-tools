@@ -46,6 +46,7 @@
 	</list>
 	
 	<list name="attacks">
+                <item> {attack </item>
 		<item> attack </item>
 		<item> attack1 </item>
 		<item> attack2 </item>
@@ -69,8 +70,10 @@
     
     <list name="commands">
 <!--       <item> frame </item> -->
+      <item> collision </item>
       <item> offset </item>
       <item> delay </item>
+      <item> {bbox </item>
       <item> bbox </item>
       <item> sound </item>
     </list>
@@ -106,6 +109,7 @@
     <contexts>
       <context attribute="Normal Text" lineEndContext="#stay" name="Normal">
         <DetectSpaces />
+         <StringDetect attribute="Attack" context="Attack" String="#attack" firstNonSpace="false" />
 	<keyword attribute="Command" context="#stay" String="commands" name="Command"/>
         
          <Detect2Chars attribute="Comment 2" context="Hash comment 2" char="#" char1="#" />
@@ -279,6 +283,6 @@
       <comment name="singleLine" start="#" />
       <comment name="multiLine" start="/*" end="*/" />
     </comments>
-    <keywords casesensitive="1" additionalDeliminator="'&quot;" />
+    <keywords casesensitive="1" additionalDeliminator="'&quot;" weakDeliminator="{" />
   </general>
 </language>

@@ -95,6 +95,8 @@ class AnimSelector(QtWidgets.QWidget):
 		self.buttonBar.addSeparator()
 		#deleteIcon = QtGui.QIcon.fromTheme('list-remove')
 		#deleteAnim = self.buttonBar.addAction(libraryIcon, 'Remove', self.deleteAnim)
+
+		addAnim = self.buttonBar.addAction(_('Header'), self.showHeader)
 		
 		if not'hideUpperBar' in options:
 			layout.addWidget(self.buttonBar, 0)
@@ -172,7 +174,8 @@ class AnimSelector(QtWidgets.QWidget):
 		
 		
 		
-		
+	def showHeader(self):
+		self.mainEditor.loadAnim('header')
 		
 	def tmp(self, val):
 		self.mainEditor.mainSplitter.setSizes([val, self.mainEditor.rect().width()])
@@ -435,11 +438,14 @@ class AnimModel(TreeModel):
 		return ('bullseye/library.items',)
 		
 	def sort(self, columnIndex, order):
+		print('sorting before')
 		self.layoutAboutToBeChanged.emit()
 		if(order == QtCore.Qt.AscendingOrder):
 			reverse = False
 		else:
 			reverse = True
+
+		headerElt = self.rootItem.childItems[0]
 			
 		def sort(elt, reverse):
 			elt.childItems = sorted(elt.childItems, key=attrgetter(self.columnsFields[columnIndex]), reverse=reverse)
@@ -447,5 +453,12 @@ class AnimModel(TreeModel):
 				sort(childElt, reverse)
 				
 		sort(self.rootItem, reverse)
+
+
+
+		headerIndex = self.rootItem.childItems.index(headerElt)
+		print('sorting', headerIndex)
+		self.rootItem.childItems.pop(headerIndex)
+		self.rootItem.childItems.insert(headerElt, 0)
 		
 		self.layoutChanged.emit()

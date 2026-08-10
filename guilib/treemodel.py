@@ -6,12 +6,14 @@ itemRole = Qt.UserRole+2
 expandedRoleWithoutFilter = Qt.UserRole+3
 containsRole = Qt.UserRole+4
 expandWithoutContainsRole = Qt.UserRole+5 # for nodes that contains a parent that contains filter, and that are expanded despite themselves not containing filter
+projectRole = Qt.UserRole+6
 
 class FilterModel(QtCore.QSortFilterProxyModel):
 	
 	def __init__(self):
             QtCore.QSortFilterProxyModel.__init__(self)
             self.expandResults = 0
+            self.projectFilter = '*'
 
 	def filterAcceptsRow(self, sourceRow, sourceParent):
 		col0 = self.sourceModel().index(sourceRow, 0, sourceParent)
@@ -23,13 +25,29 @@ class FilterModel(QtCore.QSortFilterProxyModel):
 		# print(data)
 		if data is None : return False
 		# if data is None : return True
+		
+		
+		if(self.projectFilter != '*'):
+			item = self.sourceModel().data(col0, itemRole)
+			fd = item.fd
+			
+			if(fd is None): # Means folder : should do recursive check to know if keep or not
+				res = self.folderProjectCheck(col0) 
+				if(not res): return False
+			else:
+				project = fd.projectName
+
+				if(project != '*' and project != self.projectFilter):
+						 return False
+		
+		
 		# contains = self.filterRegExp().pattern() in data
 		contains = self.filterRegExp().indexIn(data) != -1
 		# contains = data.contains(self.filterRegExp())
 		
 		
 		
-		
+		# print('setting containsRole', data, contains)
 		self.sourceModel().setData(col0, contains, containsRole)
 		self.sourceModel().setData(col0, 0, expandWithoutContainsRole) # reset
 		
@@ -86,12 +104,13 @@ class FilterModel(QtCore.QSortFilterProxyModel):
 		
 		# NOTE this is a cool feature to allow to expand folder level 1 when you search for a term and it matches a folder
 		elif self.expandResults > 0  and self.sourceModel().data(sourceParent, containsRole) == True:
+			# print("containsRole", "True", data, self.filterRegExp().pattern(), 'parent=', self.sourceModel().data(sourceParent, Qt.DisplayRole), self.sourceModel().data(sourceParent, containsRole))
 			self.sourceModel().setData(col0, 1, expandWithoutContainsRole)
 			self.sourceModel().setData(col0, True, expandedRole)
 			return True # means we show it (don't filter out)
 		elif parent_expandWithoutContains >= 1 and  self.expandResults > parent_expandWithoutContains:
 		# elif self.sourceModel().data(sourceParent, expandWithoutContainsRole) < self.expandResults:
-			print("parent_expandWithoutContains was", parent_expandWithoutContains, self.expandResults, self.sourceModel().data(col0, Qt.DisplayRole))
+			# print("parent_expandWithoutContains was", parent_expandWithoutContains, self.expandResults, self.sourceModel().data(col0, Qt.DisplayRole))
 			self.sourceModel().setData(col0, parent_expandWithoutContains+1, expandWithoutContainsRole)
 			self.sourceModel().setData(col0, True, expandedRole)
 			return True
@@ -105,6 +124,21 @@ class FilterModel(QtCore.QSortFilterProxyModel):
 		#print(contains, self.sourceModel().data(col0, Qt.DisplayRole))
 		return contains
 		# return True
+		
+	
+	def folderProjectCheck(self, col0):
+		if (self.sourceModel().hasChildren(col0)):
+			
+			for i in range(self.sourceModel().rowCount(col0)):
+				if (self.filterAcceptsRow(i, col0)):
+					return True
+			return False
+		else:
+			return False
+	
+	def setProjectFilter(self, projectFilter):
+		print('Project filter', projectFilter)
+		self.projectFilter = projectFilter
 
 class TreeItem(object):
     def __init__(self, data, parent=None):
@@ -189,7 +223,7 @@ class TreeModel(QtCore.QAbstractItemModel):
         index = QtCore.QModelIndex()#self.createIndex(0, 0)
         #index = self.createIndex(0, 0)
         for i in range(nb):
-                print('PASSING')
+                # print('PASSING')
                 index =index.child(0,0, node)
                 node = node.child(0)
         return index

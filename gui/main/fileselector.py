@@ -7,22 +7,32 @@ from PyQt5.QtWidgets import *
 from guilib.treemodel import TreeModel, TreeItem, FilterModel
 from operator import attrgetter
 
-from common import settings, xdg
+from common import settings, xdg, util
 from data import ParsedLine, FileWrapper, Cache
-from gui.modales import CreateFileDialog
+from gui.modales import CreateFileDialog, ProjectSettingsDialog
 
-from gui.util import FileInput, loadSprite
+from gui.util import FileInput, loadSprite, AccessOrderedToolbar
 from gui.level.items import Entity
 
+import hashlib
 
-SELECTED_COLOR = [100,100,255];
+MD5_CACHE = {}
+
+
+SELECTED_COLOR = [100,100,255]
 
 class File:
-	def __init__(self, path=None):
+	def __init__(self, path=None, projectName=None):
 		if path is not None:
 			self.name = os.path.basename(path)
 		else:
 			self.name = 'Unknown'
+			
+		if(projectName is not None):
+			self.projectName = projectName
+		else:
+			self.projectName = 'Unknown'
+			
 		self.path = path
 		self.lines = None
 		self.originalLines = None
@@ -33,6 +43,8 @@ class File:
 		self.isVisible = False
 		self.isAddedToAView = False
 		self.mtime = None
+		self.charenc = None
+		self.createPathIfNeeded = False
 		
 		
 	def getLongText(self):
@@ -48,14 +60,34 @@ class File:
 		f.iconPath = dic['iconPath']
 		if 'visible' in dic:
 			f.isVisible = dic['visible']
+		if 'project' in dic:
+			f.projectName = dic['project']
+			
+		if 'versions' in dic:
+			f.versions_keys = dic['versions']
+			f.versions = {}
+			f.version = dic['version']
 		
 		return f
 		
 		
 	def __str__(self):
-		return str({'path':self.path, 'category':self.category, 'iconPath':self.iconPath, 'state':self.state, 'visible':self.isVisible})
+		dic = {'path':self.path, 'category':self.category, 'iconPath':self.iconPath, 'state':self.state, 'visible':self.isVisible, 'project':self.projectName}
+		if(hasattr(self, 'versions')):
+			versions = list(self.versions.keys())
+			
+			if(hasattr(self, 'versions_keys')):
+				for key in self.versions_keys:
+					if key not in versions:
+						versions.append(key)
+			
+			dic['versions'] = versions
+			dic['version'] = self.version
+		
+		return str(dic)
 	
 	
+	@util.threaded
 	def backupUnsaved(self):
 		content = '\n'.join(self.lines)
 		
@@ -66,8 +98,12 @@ class File:
 			return
 		#print('content different, go')
 		
+		version = None
+		if hasattr(self, 'version'):
+			version = self.version
 		
-		File.DB.addBackup([self.path, content, 1, 1])
+		
+		File.DB.addBackup([self.path, content, 1, 1, version])
 		
 	
 	def checkMTime(self):
@@ -75,12 +111,18 @@ class File:
 		if self.path is None or self.mtime is None:
 			return True
 			
-		mtime = os.path.getmtime(self.path)
+		try:
+			mtime = os.path.getmtime(self.path)
+		except:
+			return True
+			
+		print('comparing', self.mtime, mtime);
 		if self.mtime != mtime:
 			return False
 		return True
 		
 	def updateMTime(self):
+		print('updating mtime')
 		self.mtime = os.path.getmtime(self.path)
 	
 	def checkSave(self):
@@ -124,7 +166,9 @@ class File:
 		# print('loading from disk', self.path)
 		try:
 			f = FileWrapper(self.path)
+
 			lines = f.getLines()
+			self.charenc = f.charenc
 			self.originalLines = list(lines)
 			self.lines = lines
 			self.saved = True
@@ -150,30 +194,223 @@ class File:
 		pass
 		
 	def save(self):
+		version = None
+		if hasattr(self, 'version'):
+			version = self.version
+		
+		@util.threaded
+		def saveDBBackup(path, oldContent):
+			lastRevContent = File.DB.getLastRevision(path, 0)
+			if(oldContent != lastRevContent):
+				File.DB.addBackup([path, oldContent, 0, 1, version])
+		
+		@util.threaded
+		def saveDBBackupCurrent(path, content):
+			File.DB.addBackup([path, content, 0, 1, version])
+		
+		saveFolder = os.path.dirname(self.path)
+		
+		if(self.createPathIfNeeded and not os.path.exists(saveFolder) ):
+			os.makedirs(saveFolder)
+		
+		fileExists = False
 		if(os.path.isfile(self.path)):
-			saveFolder = os.path.dirname(self.path)
+			fileExists = True
+			
 			fileName = os.path.basename(self.path)
 			
 			if(not settings.get_option('general/disable_advanced_auto_backup', False)):
-				content = '\n'.join(self.originalLines)
-				lastRevContent = File.DB.getLastRevision(self.path, 0)
-				if(content != lastRevContent):
-					File.DB.addBackup([self.path, content, 0, 1])
+				if(self.originalLines != None):
+					content = '\n'.join(self.originalLines)
+					saveDBBackup(self.path, content)
+				
+				# lastRevContent = File.DB.getLastRevision(self.path, 0)
+				# if(content != lastRevContent):
+				# 	File.DB.addBackup([self.path, content, 0, 1])
 					
 			if(not settings.get_option('general/disable_auto_backup', False)):
 				shutil.copyfile(self.path, os.path.join(saveFolder, '.'+fileName + '.1'))
 			
-		f = open(self.path, 'w')
+		
+		use_safe_write = settings.get_option('general/safe_file_write',  True)
+		try_different_encoding_if_error = settings.get_option('general/change_encoding_write_error',  True)
+		
+		if(use_safe_write):
+		
+			if(self.path not in MD5_CACHE):
+				MD5_CACHE[self.path] = hashlib.md5(self.path.encode('utf-8')).hexdigest()
+			md5 = MD5_CACHE[self.path]
+		
+		
+		
+			# First we try to save the file in a separate copy
+			pathCopy = os.path.join(saveFolder, md5)
+			if(fileExists):
+				shutil.copyfile(self.path, pathCopy)
+			
+			savePath = pathCopy
+			
+		else:
+			savePath = self.path
+			
+		has_been_write_error = False
+		warn_about_error = False
+		
+		
+		# self.charenc = 'ASCII' # ONLY FOR DEBUG purposes
+		
+		if(self.charenc != None):
+			f = open(savePath, 'w', encoding=self.charenc)
+		else:
+			f = open(savePath, 'w')
 		content = '\n'.join(self.lines)
-		f.write(content)
+		
+		try:
+			f.write(content)
+		except:
+			has_been_write_error = True
+			
+			if(try_different_encoding_if_error):
+				self.charenc = None
+				f.close()
+				f = open(savePath, 'w') # reopen the file without forcing any encoding
+				try:
+					f.write(content)
+				except:
+					# Last resort : the locale default used above (e.g. cp1252 on Windows) can
+					# fail again on pasted characters ; utf-8 can encode any character
+					self.charenc = 'utf-8'
+					f.close()
+					f = open(savePath, 'w', encoding='utf-8')
+					try:
+						f.write(content)
+					except:
+						warn_about_error = True
+			else:
+				warn_about_error = True
+				
+		if(warn_about_error):
+			QtWidgets.QMessageBox.warning(File.connectedWidget, _('Write error'), _('Something went wrong during write process, saved canceled'))
+			logging.debug('Fatal Write error : ' + savePath + ' ' + self.path)
+			f.close()
+			if(use_safe_write):
+				os.remove(pathCopy) # Comment this if you want to keep temp MD5 file
+			return # abort save; self.saved stays False so the UI still shows the file as unsaved
+			
 		f.close()
+		
+		if(use_safe_write):
+			if(not has_been_write_error) : shutil.copyfile(pathCopy, self.path)
+			os.remove(pathCopy) # Comment this if you want to keep temp MD5 file
+		
 		self.mtime = os.path.getmtime(self.path)
 		
 		if(not settings.get_option('general/disable_advanced_auto_backup', False)):
-			File.DB.addBackup([self.path, content, 0, 1])
+			saveDBBackupCurrent(self.path, content)
+			
 		
 		self.originalLines = list(self.lines)
 		self.saved = True
+		
+		if(hasattr(self, 'versions')): # If has versions, also save content in version model
+			try:
+				versionFD = self.versions[self.version]
+				versionFD.lines = list(self.lines)
+				versionFD.save()
+			except KeyError:
+				pass
+		
+		
+	def snapshot(self, comment=None):
+		version = None
+		if hasattr(self, 'version'):
+			version = self.version
+			
+		@util.threaded
+		def saveDBBackupCurrent(path, content):
+			File.DB.addBackup([path, content, 0, 10, version, comment])
+			
+		content = '\n'.join(self.lines)
+		saveDBBackupCurrent(self.path, content)
+
+
+class FileDB:
+	"""A File-like object backed by a database note instead of a disk file."""
+	_allNotes = {}
+
+	def __init__(self, noteId, label):
+		FileDB._allNotes[noteId] = self
+		self.noteId = noteId
+		self.name = label
+		self.path = 'note://' + str(noteId)
+		self.lines = None
+		self.originalLines = None
+		self.saved = True
+		self.iconPath = None
+		self.category = 'Note'
+		self.state = 0
+		self.isVisible = False
+		self.isAddedToAView = False
+		self.mtime = None
+		self.charenc = None
+		self.createPathIfNeeded = False
+		self.projectName = '*'
+		self.bgColor = None
+		self.fgColor = None
+
+	def selectExclusive(self):
+		for other in FileDB._allNotes.values():
+			if other is not self:
+				other.state = 0
+		self.state = 1
+
+	def getLongText(self):
+		return self.name
+
+	def isLoaded(self):
+		return self.lines is not None
+
+	def loadFromDisk(self, setupIfNotExist=False):
+		content = File.DB.getNoteContent(self.noteId)
+		self.lines = content.split('\n') if content else ['']
+		self.originalLines = list(self.lines)
+		self.saved = True
+
+	def save(self):
+		content = '\n'.join(self.lines)
+		File.DB.updateNote(self.noteId, content)
+		self.originalLines = list(self.lines)
+		self.saved = True
+
+	def checkSave(self):
+		if self.originalLines is None:
+			return
+		self.prepareChange()
+		if self.originalLines != self.lines:
+			self.saved = False
+		else:
+			self.saved = True
+		self.notifyChange()
+
+	def notifyChange(self):
+		if hasattr(self, "node"):
+			self.node.model.layoutChanged.emit()
+
+	def prepareChange(self):
+		if hasattr(self, "node"):
+			self.node.model.layoutAboutToBeChanged.emit()
+
+	def checkMTime(self):
+		return True
+
+	def updateMTime(self):
+		pass
+
+	def backupUnsaved(self):
+		pass
+
+	def snapshot(self, comment=None):
+		pass
 
 
 class CustomTreeView( QtWidgets.QTreeView):
@@ -198,9 +435,15 @@ class FileSelector(QtWidgets.QWidget):
 	
 	def __init__(self, parent):
 		self.mainEditor = parent
+		
+		self.load_session_based_on_loaded_projects = False
+		
+		File.connectedWidget = parent
 		QtWidgets.QWidget.__init__(self)
 		
 		trueLayout = QtWidgets.QHBoxLayout()
+		trueLayout.setContentsMargins(0, 0, 0, 0)
+		
 		w = QtWidgets.QWidget()
 		tabBar = QtWidgets.QTabBar()
 		tabBar.setShape(QtWidgets.QTabBar.RoundedWest)
@@ -220,6 +463,8 @@ class FileSelector(QtWidgets.QWidget):
 		wrapperLayout.setSpacing(0)
 		layout.setContentsMargins(0, 0, 0, 0)
 		
+		# self.setStyleSheet('background:red;')
+		
 		txt = _('FILE SELECTOR')
 		txt = '\n'.join(txt)
 		label = QtWidgets.QLabel(txt)
@@ -232,6 +477,40 @@ class FileSelector(QtWidgets.QWidget):
 		self.cacheLabel.hide()
 		self.content = w
 		self.setLayout(trueLayout)
+		
+		
+		self.sessions_content = {}
+		
+		
+		w = QtWidgets.QWidget()
+		l = QtWidgets.QHBoxLayout()
+		
+		w.setLayout(l)
+		
+		
+		# w.setStyleSheet('background : blue;')
+		
+		self.projectFilterBar = w
+		
+		self.projectButtonBar = AccessOrderedToolbar(self)
+		self.projectButtonBar.automaticRecentFirst = True
+		self.projectButtonBar.changed.connect(self.loadSubSession)
+		
+		self.projectButtonBar.setStyleSheet("QToolBar { margin:0px 0px;} QToolButton { padding: 2px; margin:0px 2px; }  QToolButton::on {padding : 10px;  }");
+		
+		self.projectButtonBar.showItemContextMenuExternal = self.showProjectContextMenu
+		
+		
+		l.addWidget(self.projectButtonBar, 1)
+		
+		addIcon = QtGui.QIcon.fromTheme('list-add')
+		addAnim = QtWidgets.QPushButton(addIcon, '')
+		addAnim.clicked.connect(self.openProject)
+		addAnim.setToolTip(_('Load another project'))
+		l.addWidget(addAnim, 0)
+		
+		
+		# layout.addWidget(w, 0)
 		
 		actionGroup = QtWidgets.QActionGroup(self)
 		self.buttonBar = QtWidgets.QToolBar()
@@ -257,16 +536,22 @@ class FileSelector(QtWidgets.QWidget):
 		if(theme == "Dark"): filesIcon.invertPixels()
 		filesIcon = QtGui.QIcon(QtGui.QPixmap.fromImage(filesIcon))
 		
+
 		b1 = self.buttonBar.addAction(libraryIcon, 'Library', lambda:self.setMode('library'))
 		b1bis = self.buttonBar.addAction(filesIcon, 'Opened', lambda:self.setMode('opened'))
-		
+
+		notesIcon = QtGui.QIcon.fromTheme('text-x-generic')
+		b1notes = self.buttonBar.addAction(notesIcon, 'Notes', lambda:self.setMode('notes'))
+
 		b1.setCheckable(True)
 		b1bis.setCheckable(True)
-		
+		b1notes.setCheckable(True)
+
 		b1.setChecked(True)
-		
+
 		self.libraryButton = b1
 		self.openedButton = b1bis
+		self.notesButton = b1notes
 		
 		self.buttonBar.addSeparator()
 		self.buttonBar.addSeparator()
@@ -289,6 +574,7 @@ class FileSelector(QtWidgets.QWidget):
 		
 		actionGroup.addAction(b1)
 		actionGroup.addAction(b1bis)
+		actionGroup.addAction(b1notes)
 		
 		
 		layout.addWidget(self.buttonBar, 0)
@@ -310,6 +596,7 @@ class FileSelector(QtWidgets.QWidget):
 			self.libraryModels[key] = model
 
 		self.openedModel = FileModel()
+		self.notesModel = FileModel()
 		self.treeView.setSortingEnabled(True)
 		
 		self.treeView.setAnimated(True)
@@ -333,10 +620,15 @@ class FileSelector(QtWidgets.QWidget):
 		
 		self.searchEntry = QtWidgets.QLineEdit()
 		self.searchEntry.setPlaceholderText(_('Search (press F2 to focus)'))
-		self.searchEntry.returnPressed.connect(self.search)
+		self.searchEntry.installEventFilter(self)
 		
-		if settings.get_option('misc/search_on_text_change', False):
-			self.searchEntry.textChanged.connect(self.search)
+		if settings.get_option('misc/search_on_text_change', True):
+			self.searchKeyDebounce = QtCore.QTimer()
+			self.searchKeyDebounce.setInterval(250)
+			self.searchKeyDebounce.setSingleShot(True)
+			self.searchKeyDebounce.timeout.connect(self.search)
+			
+			self.searchEntry.textChanged.connect(self.searchKeyDebounce.start)
 		
 		hboxSearch = QtWidgets.QHBoxLayout()
 		hboxSearch.setContentsMargins(0, 5, 0, 5)
@@ -347,13 +639,32 @@ class FileSelector(QtWidgets.QWidget):
 		
 		hboxSearch.addWidget(self.searchEntry, 1)
 		hboxSearch.addWidget(searchButton)
+
+		# "Search in project" hint label (shown when no results in opened files)
+		self.searchInProjectHint = QtWidgets.QLabel()
+		self.searchInProjectHint.setWordWrap(True)
+		self.searchInProjectHint.setCursor(QtCore.Qt.PointingHandCursor)
+		self.searchInProjectHint.setStyleSheet("QLabel { padding: 6px; color: palette(link); } QLabel:hover { text-decoration: underline; }")
+		self.searchInProjectHint.hide()
+		self.searchInProjectHint.mousePressEvent = lambda e: self.searchInProject()
+		self._projectSearchTimer = None
+		self._projectSearchMode = False
+		self.projectSearchModel = FileModel()
+
+
+		if settings.get_option('gui/file_selector_search_bottom', False):
+			layout.addWidget(self.treeView, 1)
+			layout.addWidget(self.searchInProjectHint, 0)
+			layout.addWidget(w, 0)
+
+		else:
+			layout.addWidget(w, 0)
+			layout.addWidget(self.searchInProjectHint, 0)
+			layout.addWidget(self.treeView, 1)
+			
 		
 		
-		
-		layout.addWidget(w, 0)
-		
-		
-		layout.addWidget(self.treeView, 1)
+			
 		
 		
 		self.filterModel = FilterModel()
@@ -407,9 +718,10 @@ class FileSelector(QtWidgets.QWidget):
 		
 		self.PROJECTS_VARS = {}
 		
+		
 	
 
-	def projectChanged(self, projectRoot=None):
+	def projectChanged(self, projectRoot=None, updateProjectBar=True):
 		
 		
 		
@@ -435,11 +747,88 @@ class FileSelector(QtWidgets.QWidget):
 			vars['libraryModels'] = self.libraryModels
 			
 			
-			self.PROJECTS_VARS[projectRoot] = vars	
+			self.PROJECTS_VARS[projectRoot] = vars
+			
+		# self.reloadProjectBar()
+		
+		if updateProjectBar:
+			self.projectButtonBar.addItem(self.mainEditor.currentProject)
+			self.projectButtonBar.addItem({'path':'*', 'name':'*', 'font_color':None, 'background_color':None})
+			
+			if('is_OpenBOR' in self.mainEditor.currentProject and not self.mainEditor.currentProject['is_OpenBOR']):
+				self.libraryButton.setVisible(False)
+			else:
+				self.libraryButton.setVisible(True)
+	
+	
+	
+	def showProjectContextMenu(self, point, button, item):
+		if item.name == '*':
+			return
+		popMenu = QtWidgets.QMenu(self)
+
+		projectSettings = popMenu.addAction(_('Settings'))
+		popMenu.addSeparator()
+		close = popMenu.addAction(_('Close'))
+
+		r = popMenu.exec_(button.mapToGlobal(point))
+
+		if(r == close):
+			self.closeProject(item.name, item)
+		elif(r == projectSettings):
+			self.showProjectSettings(item)
+			
+			
+	def closeProject(self, projectName, projectItem):
+		self.projectButtonBar.removeItem(projectItem)
+
+	def showProjectSettings(self, item):
+		projectName = item.name
+		projectPath = item.path
+		dialog = ProjectSettingsDialog(projectName, projectPath)
+		dialog.exec_()
+
+	def switchProjectFilter(self):
+		if(len (self.mainEditor.loaded_projects) > 1):
+			for key in self.mainEditor.loaded_projects:
+				if(key == self.projectButtonBar.getCurrent().name):
+					continue
+				else:
+					self.projectButtonBar.toggleItem(self.mainEditor.loaded_projects[key])
+					return
+	
+	def openProject(self):
+		self.mainEditor.core.setMode('project')
+	
+	def reloadProjectBar(self):
+		
+		b = self.projectButtonBar.addAction('*', self.loadSubSession)
+		b.setData('*')
+		b.setCheckable(True)
+		actionGroup.addAction(b)
+		
+		
+		
+		
+		b = self.projectButtonBar.addAction('current', self.loadSubSession)
+		b.setData('current')
+		b.setCheckable(True)
+		actionGroup.addAction(b)
+		
+		
+		for k in self.mainEditor.loaded_projects:
+			
+			b = self.projectButtonBar.addAction(k, self.loadSubSession)
+			b.setData(k)
+			b.setCheckable(True)
+			actionGroup.addAction(b)
+			
+	
+
 		
 		
 	def addFile(self, path, iconPath=None):
-		if path is 'New':
+		if path == 'New':
 			#self.setMode('opened')
 			if path in self.loadedPaths:
 				i = 2
@@ -455,13 +844,64 @@ class FileSelector(QtWidgets.QWidget):
 			#self.openedItem.state = 0
 		
 		if path not in self.loadedPaths:
-			fd = File(path)
+			# First we try to match the root with an opened project
+			project = None
+			for key in self.mainEditor.loaded_projects:
+				p = self.mainEditor.loaded_projects[key]
+
+				if(p['path'] in path): # root path of project is in file path
+					project = key
+
+					currentProjectFilter = self.projectButtonBar.getCurrent().name
+					if(currentProjectFilter != project and currentProjectFilter != '*'):
+						self.projectButtonBar.toggleItem(p)
+			# 	similarityPath = 0
+			# 	i = 0
+			# 	while(i < len(p.path) and i < len(path)):
+			# 		if p.path[i] == path[i]:
+			# 		similarityPath += 1
+
+			if(project is None): # If not default's to currently selected project, or last project opened if no project filtered
+				# Check if file matches an unloaded project
+				all_projects = settings.get_option('general/projects', [])
+				matching_project = None
+				for p in all_projects:
+					if p['path'] in path:
+						matching_project = p
+						break
+
+				if matching_project is not None:
+					# Found a matching unloaded project, load it and open the file
+					self.mainEditor.pending_file_to_open = path
+					self.mainEditor.core.projectSelector.loadProject(matching_project)
+					return None
+
+				# No matching project found, ask user if they want to open a different project
+				reply = QtWidgets.QMessageBox.question(
+					self,
+					_('Project mismatch'),
+					_("The file you are trying to open doesn't match the path of any project.\n\nDo you want to open another project?"),
+					QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+					QtWidgets.QMessageBox.No
+				)
+				if reply == QtWidgets.QMessageBox.Yes:
+					self.mainEditor.pending_file_to_open = path
+					self.mainEditor.core.setMode('project')
+					return None
+
+				project = self.projectButtonBar.getCurrent().name
+				if(project == '*'):
+					project = self.mainEditor.currentProject['name']
+			
+			fd = File(path, project)
 			self.loadedPaths.append(path)
 			self.loadedFiles[path] = fd
 			# print('APPENDING', path)
 			fd.state = 1
 			if path.startswith('New'): fd.path = None
-			self.reloadFilesModel()
+			# self.reloadFilesModel()
+			
+			self.reloadFilesModel_pre();
 			
 			
 			self.makeSureVisible(fd)
@@ -480,17 +920,52 @@ class FileSelector(QtWidgets.QWidget):
 			self.loadedFiles[fd.path] = fd
 			fd.state = 1
 			
+			
 			self.reloadFilesModel()
 			self.makeSureVisible(fd)
 			
 			
 	def createFile(self):
+		if self.mode == 'notes':
+			self.createNote()
+			return
 		d = CreateFileDialog()
 		if d.exec() == 1:
 			print(d.filePath, d.category)
+			self.mainEditor.openFile(d.filePath, d.category)
 			# print('know xxx ' + d.filePath)
 			
-			
+
+
+	def createNote(self):
+		from datetime import date
+		defaultLabel = date.today().strftime('%Y-%m-%d')
+		label, ok = QtWidgets.QInputDialog.getText(self, _('New note'), _('Label:'), QtWidgets.QLineEdit.Normal, defaultLabel)
+		if ok and label:
+			noteId = File.DB.createNote(label)
+			self.loadNotes()
+			fd = self._noteFDs[noteId]
+			fd.loadFromDisk()
+			fd.selectExclusive()
+			self.mainEditor.loadFile(fd, False)
+
+	def loadNotes(self):
+		self.notesModel.reset()
+		if not hasattr(self, '_noteFDs'):
+			self._noteFDs = {}
+		rows = File.DB.getAllNotes()
+		for i, row in enumerate(rows):
+			noteId = row['ID']
+			if noteId in self._noteFDs:
+				fd = self._noteFDs[noteId]
+			else:
+				fd = FileDB(noteId, row['label'])
+				self._noteFDs[noteId] = fd
+			noteItem = Item(self.notesModel.rootItem, [noteId, row['label'], i, None, None, fd], self.notesModel)
+			self.notesModel.rootItem.append(noteItem)
+		self.notesModel.layoutChanged.emit()
+		self.filterModel.sort(-1)
+
 	def collapseAll(self, button=None, parentIndex=QtCore.QModelIndex()):
 		self.treeView.collapseAll()
 		# for i in range(self.filterModel.rowCount(parentIndex)):
@@ -516,7 +991,7 @@ class FileSelector(QtWidgets.QWidget):
 	
 	def focusForSearch(self):
 		self.enterEvent(None)
-		if self.searchEntry.hasFocus():
+		if self.searchEntry.hasFocus() and (not 'is_OpenBOR' in self.mainEditor.currentProject or self.mainEditor.currentProject['is_OpenBOR'] == True):
 			if self.mode == 'opened':
 				self.setMode('library')
 			else:
@@ -534,9 +1009,36 @@ class FileSelector(QtWidgets.QWidget):
 			node.isExpanded = True
 			node = node.parent()
 		self.restoreExpandedState()
+		
+		
+	def hydrateProjectSessionFiles(self, project):
+		if self.load_session_based_on_loaded_projects:
+			if(project['name'] in self.excluded_session_files):
+				for dic in self.excluded_session_files[project['name']]:
+					path = dic['path']
+					self.loadedFiles[path] = File.fromDic(dic)
+					self.loadedPaths.append(path)
+				del self.excluded_session_files[project['name']]
+				
+				expandedFolders = self.expandedFolders_fromSession.copy()
+				
+				for fd in self.folderNodes.values():
+					if fd is not None and fd.isExpanded:
+						expandedFolders.append(fd.path)
+				
+				self.reloadFilesModel_pre(expandedFolders)
+					
+			
 			
 	def loadSession(self, name):
-		print("loading session")
+		
+		reaffect_unknown_project = -1
+		
+		self.load_session_based_on_loaded_projects = True
+		
+		self.excluded_session_files = {}
+		
+		print("loading session", name)
 		path = os.path.join(xdg.get_data_home(), 'sessions') + os.sep + name
 		#if not os.path.exists(path) : return
 		self.loadedPaths = []
@@ -559,18 +1061,88 @@ class FileSelector(QtWidgets.QWidget):
 						dic = eval(dicStr)
 						path = dic['path']
 						if os.path.exists(path):
+							if('project' in dic and dic['project'] == 'Unknown'):
+								
+								if(reaffect_unknown_project == -1):
+									if(QtWidgets.QMessageBox.question(self, _('File with Unknown project'), _('Some files in this session have unknown projects. Would you like to set them to the current project ("Yes") or keep unknown ("No") ?'), defaultButton=QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes):
+										reaffect_unknown_project = 1
+									else:
+										reaffect_unknown_project = -1
+								if(reaffect_unknown_project == 1):
+									dic['project'] = self.mainEditor.currentProject['name']
+								
+							if(self.load_session_based_on_loaded_projects and 'project' in dic and dic['project'] not in self.mainEditor.loaded_projects):
+								if( dic['project'] not in self.excluded_session_files):
+									self.excluded_session_files[dic['project']] = []
+								self.excluded_session_files[dic['project']].append(dic)
+								continue
+								
 							self.loadedFiles[path] = File.fromDic(dic)
 							self.loadedPaths.append(path)
 						
 					elif section  == 1: # Expanded folders
+						# pass
 						expandedFolders.append(line)
 		else:
 			self.sessionName = None
 			fd = self.addFile('New')
 			self.mainEditor.editor.setCurrent(fd)
-		self.reloadFilesModel(expandedFolders, True)
+			
+		self.expandedFolders_fromSession = expandedFolders
+		self.reloadFilesModel_pre(expandedFolders, True)
+
+		
+
 			
 
+	def loadSubSession(self, data=None):
+		# self.mainEditor.core.notify('Load sub', 'warning')
+		if(data is not None):
+			projectID = data.name
+			# self.projectButtonBar.addItem(data)
+		else:
+			projectID =self.sender().data()
+			
+		
+		
+		
+		if(projectID != '*'):
+			p = self.mainEditor.loaded_projects[projectID]
+			# print('TARATATA', projectID, self.mainEditor.loaded_projects[projectID])
+			self.mainEditor.temp_look_folder = p['path']
+			
+			
+			if('is_OpenBOR' not in p or p['is_OpenBOR']):
+				self.mainEditor.switchProjectCore(p['path'])
+				self.projectChanged(os.path.dirname( p['path'] ), False)
+			
+				# self.setMode('library')
+				self.loadLibrary(False)
+
+		
+		txt =self.currentFilter
+		
+		if(projectID == 'current'):
+			projectID = self.mainEditor.currentProject['name'];
+			
+			
+		self.saveExpandedStateWithoutFilters()
+		
+		# FILTER MODE
+		self.treeView.model().setProjectFilter(projectID)
+		self.treeView.model().setFilterRole(Qt.DisplayRole)
+		regExp = QtCore.QRegExp(txt, QtCore.Qt.CaseInsensitive)
+		self.treeView.model().setFilterRegExp(regExp)
+		
+		# if(txt == '' and projectID == '*'):
+		if(txt == ''):
+			self.restoreExpandedStateWithoutFilters()
+		else:
+			self.restoreExpandedState() # not really a restoring but a matching of visual expanding with expanded state in data
+		
+		# LOAD MODE
+		# self.reloadFilesModel([], False, projectID)
+		
 		
 	def tmp(self, val):
 		self.mainEditor.splitter.setSizes([val, self.mainEditor.rect().width()])
@@ -580,6 +1152,7 @@ class FileSelector(QtWidgets.QWidget):
 		Append data to model (creating a node)
 	'''
 	def append(self, dataTuple, parentNode=None, model=None):
+		# print(dataTuple, parentNode)
 		if(model is None):
 			model = self.libraryModels[self.libraryMode]
 			#model = self.treeView.model()
@@ -594,7 +1167,7 @@ class FileSelector(QtWidgets.QWidget):
 			#self.treeView.setExpanded(index, True)
 		#print('APPEND', index.isValid())
 		item = model.append(parentNode, Item(parentNode, dataTuple, model), index)
-		#model.modelReset.emit()
+		if(parentNode == None): model.modelReset.emit()
 		return item
 	
 	'''
@@ -615,13 +1188,20 @@ class FileSelector(QtWidgets.QWidget):
 	def close(self, closeAll=False):
 		self.mainEditor.updateFD() # Important if we are to delete a file that we are currently editing
 		if closeAll:
+			# Check unsaved notes
+			if hasattr(self, '_noteFDs'):
+				unsavedNotes = [fd for fd in self._noteFDs.values() if not fd.saved]
+				if len(unsavedNotes) > 0:
+					d = UnsavedFileDialog(unsavedNotes)
+					if d.exec() == 0:
+						return False
 			self.saveSession()
 			res = self.closeFolder('')
 			self.reloadFilesModel()
-			
+
 		else:
 			res = self.closeFile()
-			self.reloadFilesModel()
+			self.reloadFilesModel_pre()
 		return res
 		
 		
@@ -752,6 +1332,8 @@ class FileSelector(QtWidgets.QWidget):
 		data = []
 		model = self.libraryModels[self.libraryMode]
 		
+		
+		
 		if(self.mode == 'library'):
 			self.filterModel.setSourceModel(model)
 		if reset:
@@ -759,6 +1341,7 @@ class FileSelector(QtWidgets.QWidget):
 			ent_cache = Cache('entities_data', FileSelector.ROOT_PATH)
 			ent_cache.clear()
 			
+
 			self.mainEditor.clearCache()
 			
 			
@@ -770,6 +1353,14 @@ class FileSelector(QtWidgets.QWidget):
 			
 		if model.isFilled and not reset:
 			return
+			
+		
+		
+		currentProjectFilter = self.projectButtonBar.getCurrent()
+		if(currentProjectFilter.name != "*"):
+			currentProjectName = currentProjectFilter.name
+		else:
+			currentProjectName = self.mainEditor.currentProject['name']
 		
 		if self.libraryMode == 'Entities':
 			
@@ -784,7 +1375,7 @@ class FileSelector(QtWidgets.QWidget):
 			
 			ent_cache = Cache('entities_data', FileSelector.ROOT_PATH)
 			
-			Entity.AVAILABLE_MODELS = []
+			Entity.AVAILABLE_MODELS.clear()
 			
 			
 			f = FileWrapper(path)
@@ -851,7 +1442,7 @@ class FileSelector(QtWidgets.QWidget):
 						currentData = {'pos':i, 'label':name, 'path':path, 'type':type, 'icon':icon}
 						data.append(currentData)
 				
-			categories = ['player', 'enemy', 'npc', 'obstacle', 'panel', 'none', 'text', 'endlevel', 'trap', 'item', 'unknown']
+			categories = ['player', 'enemy', 'npc', 'obstacle', 'panel', 'none', 'text', 'endlevel', 'trap', 'item', 'steamer', 'unknown']
 			categorieNodes = {}
 			for i, c in enumerate(categories):
 				categorieNodes[c] = self.append([c, c, i, None, 'icons/' + c +'.png', None])
@@ -869,6 +1460,7 @@ class FileSelector(QtWidgets.QWidget):
 					d['icon'] = iconPath
 					fd.iconPath = iconPath
 				fd.category = 'Entity'
+				fd.projectName = currentProjectName
 				if d['type'] in categorieNodes : parentNode = categorieNodes[d['type']]
 				else : parentNode = categorieNodes['unknown']
 				#parentNode = categorieNodes['unknown']
@@ -930,6 +1522,7 @@ class FileSelector(QtWidgets.QWidget):
 					path = FileSelector.ROOT_PATH + '/' + path
 					fd = File(path)
 					fd.category = 'Level'
+					fd.projectName = currentProjectName
 					#print('z', z)
 					fd.z = z
 					fd.HUD_settings = HUD_settings
@@ -965,7 +1558,7 @@ class FileSelector(QtWidgets.QWidget):
 						scanDir(path, node)
 					else:
 						if name.endswith('~'): continue
-						node = self.append((name, name, 0, path, None, File(path)), parentNode)
+						node = self.append((name, name, 0, path, None, File(path, currentProjectName)), parentNode)
 						
 			path = os.path.join(FileSelector.ROOT_PATH, 'data', 'scripts')
 			if not os.path.exists(path): return
@@ -980,7 +1573,7 @@ class FileSelector(QtWidgets.QWidget):
 				
 				path = os.path.join(FileSelector.ROOT_PATH, 'data', name)
 				if not os.path.isfile(path): continue
-				node = self.append((name, name, 0, path, None, File(path)), None)
+				node = self.append((name, name, 0, path, None, File(path, currentProjectName)), None)
 				
 			self.libraryModels[self.libraryMode].modelReset.emit()
 			
@@ -992,33 +1585,63 @@ class FileSelector(QtWidgets.QWidget):
 	
 	
 	def loadItem(self, index):
+		
 		item = index.data(FileModel.itemRole)
 		fd = item.fd
+
 		if fd is None or (fd.path is not None and os.path.isdir(fd.path)): return
-	
-	
+
+		# Notes mode: load note content and open in editor, stay in notes mode
+		if isinstance(fd, FileDB):
+			fd.selectExclusive()
+			if not fd.isLoaded(): fd.loadFromDisk()
+			self.mainEditor.loadFile(fd, False)
+			return
+
+		self.mainEditor.temp_look_folder = None # reset temp_look_folder
+
+
+
+
+		if(fd.projectName != 'Unknown' and fd.projectName not in self.mainEditor.loaded_projects):
+			project = self.mainEditor.core.projectSelector.getProjectByName(fd.projectName)
+			if(project != None):
+				self.mainEditor.loadProject(project)
+
+
+
+		modifiers = QtWidgets.QApplication.keyboardModifiers()
+		stayInLibrary = False
+		if (modifiers & QtCore.Qt.ControlModifier): stayInLibrary = True
+
+
 		if fd.path in self.loadedFiles and self.loadedFiles[fd.path] != fd:
 			item.fd = self.loadedFiles[fd.path]
 			fd = self.loadedFiles[fd.path]
-			
-			
+
+
 		#if self.openedItem is not None:
 			#self.openedItem.state = 0
 
 		fd.state = 1
 		self.updateStates(exception=fd)
-		
+
 
 		self.openedItem = fd
 		#print(fd, fd.path, os.path.isdir(fd.path))
-		
+
 		#print(fd)
 		if not fd.isLoaded() : fd.loadFromDisk()
 		self.mainEditor.loadFile(fd, False)
-		
+
 		if self.mode == 'library':
 			self.addFromLibrary(fd)
-		
+		elif self._projectSearchMode:
+			self.addFromLibrary(fd)
+			self._exitProjectSearchMode()
+
+		if stayInLibrary:
+			return
 		self.setMode('opened')
 		self.saveExpandedStateWithoutFilters()
 		self.searchEntry.setText('')
@@ -1036,9 +1659,23 @@ class FileSelector(QtWidgets.QWidget):
 		else:
 			QtWidgets.QTreeView.mouseReleaseEvent(self.treeView, e)
 
+	
+	def reloadFilesModel_pre(self, expandedFolders=[], reset=False, projectFilter='*'):
+		# self.loadedPaths.sort()
+		# AVOID proxy error
+		if(self.mode == 'opened'):
+			self.filterModel.setSourceModel(None)
+		self.reloadFilesModel(expandedFolders, reset)
+		if(self.mode == 'opened'):
+			self.filterModel.setSourceModel(self.openedModel)
+		
+		header = self.treeView.header()
+		header.setStretchLastSection(False)
+		#header.setDefaultSectionSize(60)
+		header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+		header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
 			
-			
-	def reloadFilesModel(self, expandedFolders=[], reset=False):
+	def reloadFilesModel(self, expandedFolders=[], reset=False, projectFilter='*'):
 		def match(pattern):
 			nb = 0
 			for f1 in folders:
@@ -1074,7 +1711,12 @@ class FileSelector(QtWidgets.QWidget):
 		      #'/home/piccolo/workspace/OpenBOR/data/scripts/dcancel.c', '/home/piccolo/workspace/OpenBOR/data/chars/zangief/zangief.txt', '/home/piccolo/workspace/OpenBOR/data/chars/amingo/amingo.txt']
 
 		filesToAdd = []
+		# loadedPaths contains all files, then filesToAdd will be used later
 		for path in self.loadedPaths:
+			if(projectFilter != '*'):
+				fd = self.loadedFiles[path]
+				if(fd.projectName != projectFilter):
+					continue
 			filesToAdd.append(path)
 			if path.startswith('New'): # Rather check if fd.orginalLines is None
 				continue
@@ -1177,20 +1819,34 @@ class FileSelector(QtWidgets.QWidget):
 				node = self.append((os.path.basename(f), os.path.basename(f), 0, f, ':folder', None), parentNode, self.openedModel)
 			folderNodes[f] = node
 			if f in expandedFolders : node.isExpanded = True
+		# *** END FOLDERS ***
 		
+		
+		# *** BEGIN FILES TO ADD ***
 		for path in filesToAdd:
-			parentNode = folderNodes[os.path.dirname(path)]
+			if '/app/' in path: # Special case for Next.JS router:
+				pos = path.index('/app/') + len('/app')
+				dirname = path[0:pos]
+				parentNode = folderNodes[dirname]
+				baseName = path[pos:]
+			else:
+				parentNode = folderNodes[os.path.dirname(path)]
+				baseName = os.path.basename(path)
 			fd = self.loadedFiles[path]
 			fd.isAddedToAView = True
+			fd.baseName = baseName
 			#if fd.isVisible : # DEPRECATED?
 				#parentNode.isExpanded = True
 				#self.expandedFolders.add(parentNode.path)
-			node = self.append((os.path.basename(path), os.path.basename(path), 0, path, iconPath, fd), parentNode, self.openedModel)
+			node = self.append((baseName, baseName, 0, path, iconPath, fd), parentNode, self.openedModel)
 			fd.node = node
 			
 		self.folderNodes = folderNodes
 		
+		
 		self.openedModel.modelReset.emit()
+		
+		
 
 		if(self.mode == 'opened'):
 			#self.treeView.update()
@@ -1215,6 +1871,10 @@ class FileSelector(QtWidgets.QWidget):
 			
 	def remove(self, path):
 		if path in self.loadedPaths:
+			
+			# Also remove file from editor recent bar
+			self.mainEditor.editor.recentBar.removeItem({'path':path})
+			
 			self.loadedPaths.remove(path)
 			self.mainEditor.remove(self.loadedFiles[path])
 			del self.loadedFiles[path]
@@ -1256,14 +1916,20 @@ class FileSelector(QtWidgets.QWidget):
 			#self.treeView.setModel(self.model)
 			self.filterModel.setSourceModel(self.libraryModels[self.libraryMode])
 			self.libraryButton.setChecked(True)
+			self.filterModel.sort(0)
+		elif mode == 'notes':
+			self.loadNotes()
+			self.filterModel.setSourceModel(self.notesModel)
+			self.notesButton.setChecked(True)
 		else:
-			if self.mode != 'opened':
+			if self.mode != 'opened': # or self.filterModel.sourceModel() != self.openedModel:
 				#self.treeView.setModel(self.openedModel)
 				self.filterModel.setSourceModel(self.openedModel)
 			#self.treeView.expandAll()
 			#self.libraryButton.setChecked(False)
 			self.openedButton.setChecked(True)
-			
+			self.filterModel.sort(0)
+
 		self.restoreExpandedState()
 		self.mode = mode
 	
@@ -1288,24 +1954,46 @@ class FileSelector(QtWidgets.QWidget):
 		# Method 1
 		# self.treeView.setCurrentIndex(self.openedModel.indexOfNode(fd.node))
 	
+	def eventFilter(self, obj, event):
+		if obj == self.searchEntry and event.type() == QtCore.QEvent.KeyPress:
+			if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+				if event.modifiers() & QtCore.Qt.ControlModifier:
+					self._onCtrlEnterSearch()
+				else:
+					self._onSearchEnter()
+				return True
+		return super().eventFilter(obj, event)
+
+	def _onSearchEnter(self):
+		txt = self.searchEntry.text()
+		if txt == '': return
+		if not settings.get_option('misc/search_on_text_change', True):
+			self.search()
+		elif self._projectSearchTimer is None:
+			self.searchInProject()
+
+	def _onCtrlEnterSearch(self):
+		self.search()
+
 	def search(self):
 		txt = self.searchEntry.text()
-		
-		
+
+
 		if(txt != self.currentFilter or txt == ''):
 			self.treeView.model().expandResults = 0
 		elif(txt == self.currentFilter):
+			self.mainEditor.core.notify('expandResults += 1', 'warning')
 			self.treeView.model().expandResults += 1
-		
-			
+
+
 		self.currentFilter = txt
-		
+
 		if(txt != ''):
 			self.saveExpandedStateWithoutFilters()
-			
-			
-		
-	
+
+
+
+
 		self.treeView.model().setFilterRole(Qt.DisplayRole)
 		regExp = QtCore.QRegExp(txt, QtCore.Qt.CaseInsensitive)
 		self.treeView.model().setFilterRegExp(regExp)
@@ -1314,7 +2002,241 @@ class FileSelector(QtWidgets.QWidget):
 		else:
 			self.restoreExpandedState() # not really a restoring but a matching of visual expanding with expanded state in data
 		#self.treeView.expandAll()
-		
+
+		# Show "search in project" hint if no results in opened files mode
+		self._updateSearchInProjectHint(txt)
+
+	def _updateSearchInProjectHint(self, txt):
+		# Cancel any ongoing project search when the filter changes
+		self._exitProjectSearchMode()
+
+		if txt == '' or self.mode != 'opened':
+			self.searchInProjectHint.hide()
+			return
+
+		projectFilter = self.projectButtonBar.getCurrent().name
+		if projectFilter != '*':
+			scope = _('project') + ' "' + projectFilter + '"'
+		else:
+			scope = _('loaded projects')
+
+		searchOnChange = settings.get_option('misc/search_on_text_change', True)
+		hasResults = self.filterModel.rowCount() > 0
+		if hasResults and not searchOnChange:
+			self.searchInProjectHint.hide()
+			return
+
+		enterHint = _('Press Enter or click') if searchOnChange else _('Click')
+		if hasResults:
+			self.searchInProjectHint.setText(
+				enterHint + _(' here to search in ') + scope + '.'
+			)
+		else:
+			self.searchInProjectHint.setText(
+				_('No results. ') + enterHint + _(' here to search in ') + scope + '.'
+			)
+		self.searchInProjectHint.setCursor(QtCore.Qt.PointingHandCursor)
+		self.searchInProjectHint.show()
+
+	def _exitProjectSearchMode(self):
+		if self._projectSearchTimer is not None:
+			self._projectSearchTimer.stop()
+			self._projectSearchTimer = None
+		if self._projectSearchMode:
+			self._projectSearchMode = False
+			self.projectSearchModel.reset()
+			if hasattr(self, '_savedProjectFilter'):
+				self.filterModel.setProjectFilter(self._savedProjectFilter)
+			self.filterModel.setSourceModel(self.openedModel)
+
+	def searchInProject(self):
+		txt = self.searchEntry.text()
+		if txt == '': return
+
+		# Stop any previous search
+		if self._projectSearchTimer is not None:
+			self._projectSearchTimer.stop()
+			self._projectSearchTimer = None
+
+		self._projectSearchMode = True
+		self.searchInProjectHint.setText(_('Searching...'))
+		self.searchInProjectHint.setCursor(QtCore.Qt.ArrowCursor)
+
+		# Switch to the project search model
+		self.projectSearchModel.reset()
+		self.filterModel.setFilterRegExp(QtCore.QRegExp('', QtCore.Qt.CaseInsensitive))
+		self._savedProjectFilter = self.filterModel.projectFilter
+		self.filterModel.setProjectFilter('*')
+		self.filterModel.setSourceModel(self.projectSearchModel)
+
+		# Determine which projects to scan
+		projectFilter = self.projectButtonBar.getCurrent().name
+		if projectFilter != '*' and projectFilter != 'current':
+			projectsToScan = {projectFilter: self.mainEditor.loaded_projects[projectFilter]}
+		else:
+			projectsToScan = dict(self.mainEditor.loaded_projects)
+
+		self._projectSearchProjectPaths = {name: data['path'] for name, data in projectsToScan.items()}
+		self._projectSearchTreeMode = settings.get_option('gui/project_search_tree_mode', True)
+		self._projectSearchFolderNodes = {'': None}
+
+		# Build a generator that walks all project directories
+		pattern = txt.lower()
+		def _matchesBlacklistPattern(name, blPattern):
+			"""Check if name matches a simple wildcard pattern (only * supported)."""
+			if '*' not in blPattern:
+				return name == blPattern
+			# Convert simple wildcard to prefix/suffix check
+			if blPattern.startswith('*') and blPattern.endswith('*'):
+				return blPattern[1:-1] in name
+			elif blPattern.startswith('*'):
+				return name.endswith(blPattern[1:])
+			elif blPattern.endswith('*'):
+				return name.startswith(blPattern[:-1])
+			else:
+				# Pattern like "foo*bar"
+				parts = blPattern.split('*', 1)
+				return name.startswith(parts[0]) and name.endswith(parts[1])
+
+		def fileGenerator():
+			for projectName, projectData in projectsToScan.items():
+				projectPath = projectData['path']
+				whitelist = settings.get_option('project/' + projectName + '/search_whitelist', [])
+				blacklist = settings.get_option('project/' + projectName + '/search_blacklist', [])
+
+				if whitelist:
+					# Only walk whitelisted directories
+					walkRoots = []
+					for wDir in whitelist:
+						fullPath = os.path.join(projectPath, wDir)
+						if os.path.isdir(fullPath):
+							walkRoots.append(fullPath)
+				else:
+					walkRoots = [projectPath]
+
+				for walkRoot in walkRoots:
+					for dirpath, dirnames, filenames in os.walk(walkRoot):
+						# Filter out blacklisted directories
+						filtered = []
+						for d in dirnames:
+							if d.startswith('.'):
+								continue
+							skip = False
+							for bl in blacklist:
+								if _matchesBlacklistPattern(d, bl):
+									skip = True
+									break
+							if not skip:
+								filtered.append(d)
+						dirnames[:] = filtered
+
+						for filename in filenames:
+							# Filter out blacklisted files
+							if blacklist:
+								skip = False
+								for bl in blacklist:
+									if _matchesBlacklistPattern(filename, bl):
+										skip = True
+										break
+								if skip:
+									continue
+							if pattern in filename.lower():
+								yield os.path.join(dirpath, filename), projectName
+
+		self._projectSearchGen = fileGenerator()
+		self._projectSearchCount = 0
+
+		# Use a timer to add results progressively
+		self._projectSearchTimer = QtCore.QTimer()
+		self._projectSearchTimer.setInterval(0)
+		self._projectSearchTimer.timeout.connect(self._projectSearchStep)
+		self._projectSearchTimer.start()
+
+	def _projectSearchStep(self):
+		BATCH_SIZE = 20
+		added = 0
+		for i in range(BATCH_SIZE):
+			try:
+				path, projectName = next(self._projectSearchGen)
+			except StopIteration:
+				self._projectSearchTimer.stop()
+				self._projectSearchTimer = None
+				if self._projectSearchCount == 0:
+					self.searchInProjectHint.setText(_('No files found.'))
+				else:
+					self.searchInProjectHint.setText(str(self._projectSearchCount) + _(' file(s) found.'))
+				if self._projectSearchTreeMode:
+					QtCore.QTimer.singleShot(0, self.treeView.expandAll)
+				return
+
+			fd = File(path, projectName)
+			fd.state = 0
+
+			if self._projectSearchTreeMode:
+				# Tree mode: group by folders
+				folder = os.path.dirname(path)
+				if folder not in self._projectSearchFolderNodes:
+					self._buildSearchFolderNode(folder)
+				parentNode = self._projectSearchFolderNodes[folder]
+				label = os.path.basename(path)
+			else:
+				# Flat mode: show relative path
+				projectPath = self._projectSearchProjectPaths.get(projectName, '')
+				relPath = path[len(projectPath):].lstrip(os.sep) if path.startswith(projectPath) else path
+				parentNode = None
+				label = relPath
+
+			node = self._appendToSearchModel(label, path, fd, parentNode)
+			fd.node = node
+			added += 1
+			self._projectSearchCount += 1
+
+		if added > 0:
+			if self._projectSearchTreeMode:
+				QtCore.QTimer.singleShot(0, self.treeView.expandAll)
+			self.searchInProjectHint.setText(_('Searching... ') + str(self._projectSearchCount) + _(' file(s) found so far.'))
+
+	def _appendToSearchModel(self, label, path, fd, parentNode):
+		'''Append a node to projectSearchModel using proper beginInsertRows/endInsertRows'''
+		model = self.projectSearchModel
+		if parentNode is None:
+			parentNode = model.rootItem
+			parentIndex = QtCore.QModelIndex()
+		else:
+			parentIndex = model.createIndex(parentNode.row(), 0, parentNode)
+
+		rowCount = parentNode.childCount()
+		model.beginInsertRows(parentIndex, rowCount, rowCount)
+		node = Item(parentNode, (label, label, 0, path, None, fd), model)
+		parentNode.append(node)
+		model.endInsertRows()
+		return node
+
+	def _buildSearchFolderNode(self, folder):
+		if folder in self._projectSearchFolderNodes:
+			return self._projectSearchFolderNodes[folder]
+
+		parent = os.path.dirname(folder)
+		if parent == folder:  # root
+			self._projectSearchFolderNodes[folder] = None
+			return None
+
+		if parent not in self._projectSearchFolderNodes:
+			self._buildSearchFolderNode(parent)
+
+		parentNode = self._projectSearchFolderNodes[parent]
+		name = os.path.basename(folder)
+		node = self._appendToSearchModel(name, folder, None, parentNode)
+		node.isExpanded = True
+		node.iconPath = ':folder'
+		self._projectSearchFolderNodes[folder] = node
+		return node
+
+
+	def saveProjectSession(self, name):
+		if(self.mainEditor.currentProject != None):
+			self.mainEditor.currentProject['last_session'] = name
+			self.mainEditor.core.projectSelector.actualizeProject(self.mainEditor.currentProject)
 		
 	def saveSession(self, name=None):
 		if self.isSavingSession:
@@ -1345,12 +2267,13 @@ class FileSelector(QtWidgets.QWidget):
 		self.lastSaveTime = ts
 		self.lastSaveName = name
 		settings.set_option('general/last_session', name)
+		self.saveProjectSession(name)
 		
 		if name is None:
 			self.isSavingSession = False
 			return # TODO dialog for saving
 		
-		f = open(os.path.join(xdg.get_data_home(), 'sessions') + os.sep + name, 'w')
+		
 		
 		#output = '\n'.join(map(str, self.loadedFiles.values()))
 		
@@ -1359,35 +2282,233 @@ class FileSelector(QtWidgets.QWidget):
 			if fd.path is not None and os.path.exists(fd.path):
 				fd.isVisible = os.path.dirname(fd.path) in self.expandedFolders
 				toSave.append(fd)
+
+			
+		
+				
 		
 		logging.debug('FILES TO SAVE : ' + str(toSave))
 		output = '\n'.join(map(str, toSave))
 		
+		# we also save back the original excluded/filtered files of the session
+		if(hasattr(self, "excluded_session_files")):
+			for project in self.excluded_session_files:
+				for dic in self.excluded_session_files[project]:
+					output += "\n" + str(dic)
+		
 		output += '\n\n'
 		
 		
+		
+		
+		expandedFolders = []
 		for fd in self.folderNodes.values():
 			if fd is not None and fd.isExpanded:
 				logging.debug(fd.path)
 				output += fd.path + '\n'
-		
-		#for path in self.loadedFiles:
-			#f.write(path + "\n")
-		f.write(output)
-		f.close()
+				expandedFolders.append(fd.path)
+			
+		if(hasattr(self, "expandedFolders_fromSession")):
+			for path in self.expandedFolders_fromSession:
+				if path not in expandedFolders:
+					output += path + '\n'
+			
+		if(output.strip() != ''):
+			#for path in self.loadedFiles:
+				#f.write(path + "\n")
+				
+			if name in self.sessions_content and self.sessions_content[name] == output:
+				pass # not need to save, content has not changed
+			else:
+				
+				sessionPath = os.path.join(xdg.get_data_home(), 'sessions') + os.sep + name
+				# Also save in backup DB
+				@util.threaded
+				def _backupSession(params):
+					File.DB.addBackup(params)
+				_backupSession([sessionPath, output, 0, 1, 'standard'])
+
+				f = open(sessionPath, 'w')
+				f.write(output)
+				f.close()
+				self.sessions_content[name] = output
 		logging.debug('END OF SAVE SESSION : ' + name)
 		self.isSavingSession = False
 		
 	def showContextMenu(self, pos):
+		
+		def actionTriggered(action):
+			print("menu_action triggered", action)
+			if action == delete:
+				self.deleteItem(index)
+			elif action == copyLocation:
+				clipboard = QtWidgets.QApplication.clipboard()
+				clipboard.setText(item.fd.path)
+			elif action == openInFileBrowser:
+				import subprocess
+				import sys
+				filePath = item.fd.path
+				if sys.platform == 'linux':
+					# Detect default file manager and use appropriate command
+					default_fm = ''
+					try:
+						result = subprocess.run(
+							['xdg-mime', 'query', 'default', 'inode/directory'],
+							capture_output=True, text=True
+						)
+						default_fm = result.stdout.strip().lower()
+					except:
+						pass
+
+					try:
+						if 'LFB' in default_fm or 'lfb' in default_fm:
+							subprocess.Popen(['/home/piccolo/workspace/Daimao-Journal-JS-4/dist/life-file-browser/life-file-browser', '--select', filePath])
+						elif 'nemo' in default_fm and shutil.which('nemo'):
+							subprocess.Popen(['nemo', filePath])
+						elif 'nautilus' in default_fm and shutil.which('nautilus'):
+							subprocess.Popen(['nautilus', '--select', filePath])
+						elif 'dolphin' in default_fm and shutil.which('dolphin'):
+							subprocess.Popen(['dolphin', '--select', filePath])
+						elif 'thunar' in default_fm and shutil.which('thunar'):
+							subprocess.Popen(['thunar', filePath])
+						elif 'pcmanfm' in default_fm and shutil.which('pcmanfm'):
+							subprocess.Popen(['pcmanfm', filePath])
+						elif 'caja' in default_fm and shutil.which('caja'):
+							subprocess.Popen(['caja', filePath])
+						else:
+							# Fallback: D-Bus method
+							subprocess.Popen(['dbus-send', '--session', '--dest=org.freedesktop.FileManager1',
+								'--type=method_call', '/org/freedesktop/FileManager1',
+								'org.freedesktop.FileManager1.ShowItems',
+								'array:string:file://' + filePath, 'string:'])
+					except:
+						# Last resort: open parent folder
+						subprocess.Popen(['xdg-open', os.path.dirname(filePath)])
+				elif sys.platform == 'darwin':
+					subprocess.Popen(['open', '-R', filePath])
+				elif sys.platform == 'win32':
+					subprocess.Popen(['explorer', '/select,', filePath])
+			elif action == compare1:
+				self.compare1_path = item.fd.path
+	
+			elif action in open_equivalent:
+				destinationProject = open_equivalent[action]
+				compare1_path = item.fd.path
+				# we remove project root from path, to get only the relative path
+				relativePath = compare1_path.replace(  self.mainEditor.loaded_projects[ item.fd.projectName ]['path'], '' )
+				compare2_path = self.mainEditor.loaded_projects[ destinationProject]['path'] + relativePath
+				
+				self.mainEditor.openFile(compare2_path, item.fd.category)
+				
+			elif action == compare2 or action in compare_to_equivalents:
+				
+				
+				if action == compare2:
+					self.compare2_path = item.fd.path
+				else:
+					destinationProject = compare_to_equivalents[action]
+					self.compare1_path = item.fd.path
+					# we remove project root from path, to get only the relative path
+					relativePath = self.compare1_path.replace(  self.mainEditor.loaded_projects[ item.fd.projectName ]['path'], '' )
+					self.compare2_path = self.mainEditor.loaded_projects[ destinationProject]['path'] + relativePath
+				
+				
+				import subprocess
+				
+				command = settings.get_option('compare_tool/compare_program_path', 'meld')
+				commandMask = settings.get_option('compare_tool/command_mask', '{program} {file1} {file2}')
+				commandMask = commandMask.replace(' ', '@')
+				commandMask = commandMask.replace('{program}', command)
+				commandMask = commandMask.replace('{file1}', self.compare1_path)
+				commandMask = commandMask.replace('{file2}', self.compare2_path)
+				
+				subprocess.Popen(commandMask.split('@'))
+				# subprocess.Popen([command, self.compare1_path, self.compare2_path])
+				# subprocess.call(command + ' "' + self.compare1_path + '" "' + self.compare2_path +'"', shell=True)
+				
+			popMenu.close()
+		
 		index = self.sender().indexAt(pos)
 		if not index.isValid() : return
 		item = index.data(FileModel.itemRole) #internalPointer()
 		
 		popMenu = QtWidgets.QMenu(self)
 		delete = popMenu.addAction(QtGui.QIcon.fromTheme('list-remove'), _("Close"))
+		copyLocation = popMenu.addAction(QtGui.QIcon.fromTheme('edit-copy'), _("Copy location"))
+		openInFileBrowser = popMenu.addAction(QtGui.QIcon.fromTheme('folder-open'), _("Open in file browser"))
+		compare1 = popMenu.addAction(_("Compare 1"))
+		compare2 = popMenu.addAction(_("Compare 2"))
+		
+		compare_to_equivalents = {}
+		open_equivalent = {}
+		
+		simpleActions = False
+		
+		actions_to_add = {'compare':[], 'open':[]} 
+		actions_tmp = []
+		
+		
+		
+		for projectName in self.mainEditor.loaded_projects:
+			if(projectName != item.fd.projectName):
+				
+				if simpleActions:
+					action = popMenu.addAction(_("Compare to equivalent in project ") + projectName)
+					compare_to_equivalents[action] = projectName 
+					action = popMenu.addAction(_("Open equivalent in project ") + projectName)
+					open_equivalent[action] = projectName
+					#for w in action.associatedWidgets():
+					#w = popMenu.widgetForAction(action)
+						#w = action.defaultWidget()
+						#print('TULIA', w)
+						#w.setStyleSheet("QToolButton { background:red; } ");
+				else:
+					
+					projectData = self.mainEditor.loaded_projects[projectName]
+				
+					button= QtWidgets.QToolButton(popMenu);
+					#button.setFixedSize(50,50);
+					button.setText(_("Compare to equivalent in project ") + projectName)
+					button.setStyleSheet("QToolButton { color:" + projectData['font_color'] + ";background:" + projectData['background_color']  + "; } QToolButton:hover { font-weight:bold;} ");
+					action=QtWidgets.QWidgetAction(self);
+					action.setDefaultWidget(button);
+					
+					#button.triggered.connect(actionTriggered)
+
+					button.pressed.connect(lambda x=action:actionTriggered(x))
+					#action.triggered.connect(lambda:actionTriggered(action))
+					
+					actions_to_add['compare'].append(action)
+					
+					compare_to_equivalents[action] = projectName 
+					
+					
+					button= QtWidgets.QToolButton(popMenu);
+					#button.setFixedSize(50,50);
+					button.setText(_("Open equivalent in project ") + projectName)
+					button.setStyleSheet("QToolButton { color:" + projectData['font_color'] + ";background:" + projectData['background_color']  + "; } QToolButton:hover { font-weight:bold;} ");
+					action=QtWidgets.QWidgetAction(self);
+					action.setDefaultWidget(button);
+					
+					#button.triggered.connect(actionTriggered)
+					button.pressed.connect(lambda x=action :actionTriggered(x))
+					#action.triggered.connect(lambda:actionTriggered(action))
+					
+					actions_to_add['open'].append(action)
+					
+					open_equivalent[action] = projectName 
+			
+		# that way they are grouped by action type, cleared like that
+		for key in ['compare', 'open']:
+			for action in actions_to_add[key]:
+				popMenu.addAction(action);
+
+				
+		
 		action = popMenu.exec_(self.sender().mapToGlobal(pos))
-		if action == delete:
-			self.deleteItem(index)
+		
+		actionTriggered(action)
+		
 			
 			
 	def updateStates(self, exception=None):
@@ -1522,9 +2643,11 @@ class FileModel(TreeModel):
 						item.icon = QtGui.QIcon.fromTheme('folder').pixmap(self.icon_size)
 						
 					else:
-						
-						item.icon =  QtGui.QPixmap.fromImage(loadSprite(path))
-						if(item.icon.isNull()):
+						try:
+							item.icon =  QtGui.QPixmap.fromImage(loadSprite(path))
+						except:
+							pass
+						if(item.icon == None or item.icon.isNull()):
 							#item.icon = self.icons[item.type]
 							pass
 						else:

@@ -5,7 +5,7 @@ from configparser import (
     NoSectionError,
     NoOptionError
 )
-from common import xdg
+from common import xdg, util
 import os
 import logging
 import threading
@@ -13,6 +13,12 @@ import threading
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
+
+VERSION = '0.7.11.2 (07/07/26)'
+
+
+
+ALPHA = False
 
 TYPE_MAPPING = {
     'I': int,
@@ -24,6 +30,7 @@ TYPE_MAPPING = {
 }
 
 MANAGER = None
+DB = None
 
 
 class SettingsManager(RawConfigParser):
@@ -37,8 +44,10 @@ class SettingsManager(RawConfigParser):
 	def __init__(self, location=None):
 		RawConfigParser.__init__(self)
 		self.location = location
-		self._saving = False
+		self._save_lock = threading.Lock()
 		self._dirty = False
+		
+		self.lastContent = None
 
 		if location is not None:
 			try:
@@ -72,17 +81,34 @@ class SettingsManager(RawConfigParser):
 		:type option: string
 		:param value: the value the option should be assigned
 		"""
+		
+		# print("settings", "set_option", option, value)
 		value = self._val_to_str(value)
 		splitvals = option.split('/')
 		section, key = "/".join(splitvals[:-1]), splitvals[-1]
+		
+		
+		changed = True
 
 		try:
+			try:
+				previousValue = self._val_to_str(self.get_option(option))
+				print("comparing value A", previousValue)
+				print("comparing value B", value)
+				if(previousValue == value): changed = False
+			except ValueError:
+				pass
 			self.set(section, key, value)
 		except NoSectionError:
 			self.add_section(section)
 			self.set(section, key, value)
 
-		self._dirty = True
+		if(changed):
+			self._dirty = True
+			print('changed')
+		else:
+			pass
+			print('not changed')
 
 		section = section.replace('/', '_')
 
@@ -113,49 +139,75 @@ class SettingsManager(RawConfigParser):
 	def delete(self):
 		os.remove(self.location)
 	
+	@util.threaded
 	def save(self):
 		"""
-		Save the settings to disk
+		Save the settings to disk, in a background thread
 		"""
-		
+		self.save_sync()
+
+	def save_sync(self):
+		"""
+		Save the settings to disk, synchronously.
+		Concurrent calls are serialized by a lock : a call waits for any
+		in-flight save instead of silently skipping it. Use this (not save())
+		right before quitting : a threaded (daemon) save can be killed by the
+		process exit before the file is actually written.
+		"""
+
+		print("settings", "save, dirty ?", self._dirty)
+
 		if self.location is None:
 			logger.debug("Save requested but not saving settings, location is None")
 			return
-		
-		if self._saving or not self._dirty:
-			return
 
-		self._saving = True
-		
-		self.set_option('general/version', self.VERSION)
+		with self._save_lock:
+			if not self._dirty:
+				return
 
-		logger.debug("Saving settings...")
+			self.set_option('general/version', self.VERSION)
 
-		with open(self.location + ".new", 'w') as f:
-			self.write(f)
+			logger.debug("Saving settings...")
+
+			# cleared BEFORE writing : an option set while we are writing must
+			# re-mark dirty for the next save, not be wiped once we are done
+			self._dirty = False
+
+			with open(self.location + ".new", 'w') as f:
+				self.write(f)
+
+				try:
+					# make it readable by current user only, to protect private data
+					os.fchmod(f.fileno(), 384)
+				except:
+					pass # fail gracefully, eg if on windows
+
+				f.flush()
 
 			try:
-				# make it readable by current user only, to protect private data
-				os.fchmod(f.fileno(), 384)
+				if(DB != None):
+					f = open(self.location+ ".new", 'r')
+					content = f.read()
+					f.close()
+					if content != self.lastContent:
+						DB.addBackup([self.location, content, 0, 1, 'standard'])
+					self.lastContent = content
+				os.rename(self.location, self.location + ".old")
 			except:
-				pass # fail gracefully, eg if on windows
+				pass # if it doesn'texist we don't care
 
-			f.flush()
+			try:
+				os.remove(self.location)
+			except:
+				pass
 
-		try:
-			os.rename(self.location, self.location + ".old")
-		except:
-			pass # if it doesn'texist we don't care
 
-		os.rename(self.location + ".new", self.location)
+			os.rename(self.location + ".new", self.location)
 
-		try:
-			os.remove(self.location + ".old")
-		except:
-			pass
-
-		self._saving = False
-		self._dirty = False
+			try:
+				os.remove(self.location + ".old")
+			except:
+				pass
 		
 		
 		
@@ -204,8 +256,18 @@ class SettingsManager(RawConfigParser):
 
 
 
+fileName = "settings.ini"
+if ALPHA:
+	fileName = "settings-alpha.ini"
 
-MANAGER = SettingsManager(os.path.join(xdg.get_config_dir(), "settings.ini" ))
+# MANAGER = SettingsManager(os.path.join(xdg.get_config_dir(), "settings.ini" ))
+
+
+fullPath = os.path.join(xdg.get_config_dir(), fileName )
+
+
+
+MANAGER = SettingsManager(fullPath)
 
 get_option = MANAGER.get_option
 set_option = MANAGER.set_option

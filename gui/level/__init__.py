@@ -241,7 +241,7 @@ class LevelEditorWidget(QtWidgets.QWidget):
 		self.logWidget.setPlainText(text)
 		
 	def loadVideoMode(self):
-		ROOT_PATH = os.path.dirname(settings.get_option('general/data_path', ''))
+		ROOT_PATH = LevelEditorWidget.ROOT_PATH
 		path = os.path.join(ROOT_PATH, 'data', 'video.txt')
 		print(path)
 		if not os.path.isfile(path):
@@ -290,6 +290,9 @@ class LevelEditorWidget(QtWidgets.QWidget):
 		
 		self.levelControlWidget.loadHideButtons()
 		
+		self.levelControlWidget.lockGeometry(None)
+		self.levelControlWidget.lockEntities(None)
+		
 	'''
 		Recreate the text with the current data
 	'''
@@ -307,14 +310,16 @@ class LevelEditorWidget(QtWidgets.QWidget):
 		inDeletedEntity = False
 		isInScript = False
 		for line in self.lines:
+			
 			pLine = ParsedLine(line)
 			part = pLine.next()
 			if part is None:
 				pass
-			elif part.lower() == '@end_script':
+			elif part.lower() == '@end_script' or '@end_script' in line:
 				isInScript = False
 			elif isInScript:
-				continue
+				# continue
+				pass
 				# processScriptLine()
 			elif part.lower() == 'wall':
 				inEntity = False
@@ -391,11 +396,18 @@ class LevelEditorWidget(QtWidgets.QWidget):
 						line = 'map ' + str(e.mapColor)
 						newLines.append(line)
 						
-						
 					
-					if( (e.facingRight and e.type != 'none') or (not e.facingRight and e.type == 'none' )):
-						line = 'flip 1'
-						newLines.append(line)
+					ignore_facing = settings.get_option('level/entity_none_ignore_facing', False)
+					
+					
+					if(ignore_facing):
+						if( (e.facingRight and e.type != 'none') or (not e.facingRight and e.type == 'none' )):
+							line = 'flip 1'
+							newLines.append(line)
+					else:
+						if( e.facingRight  ):
+							line = 'flip 1'
+							newLines.append(line)
 						
 					if(e.dropItem != ''):
 						newLines.append('item ' + e.dropItem)
@@ -409,7 +421,14 @@ class LevelEditorWidget(QtWidgets.QWidget):
 					if(e.dropItem4 != ''):
 						newLines.append('4pitem ' + e.dropItem4)
 						
-					line = 'at ' + str(e.at)
+					
+					
+					val = e.at
+					if(self.direction == 'left'):
+						val -= self.fullWidth
+						val = val * -1
+					
+					line = 'at ' + str(val)
 					
 
 					
@@ -465,11 +484,18 @@ class LevelEditorWidget(QtWidgets.QWidget):
 			self.levelControlWidget.hide()
 			item = self.scene.selectedItems()[0]
 			if type(item) == Entity:
+				if(self.levelControlWidget.lockEntitiesState): 
+					self.rightPanel.setCurrentWidget(self.levelControlWidget)
+					return
 				self.rightPanel.setCurrentWidget(self.entityControlWidget)
 				self.entityControlWidget.load(item)
 		
 			elif type(item) == Wall or type(item) == Basemap:
+				if(self.levelControlWidget.lockGeometryState):
+					self.rightPanel.setCurrentWidget(self.levelControlWidget)
+					return
 				self.rightPanel.setCurrentWidget(self.wallControlWidget)
+				self.wallControlWidget.load(item)
 				
 			
 		
@@ -834,9 +860,13 @@ class EntityControlWidget(QtWidgets.QWidget):
 		
 		self.lineEdits['x'].setText(str(x))
 		self.lineEdits['z'].setText(str(y))
-		self.lineEdits['at'].setText(str(self.item.at))
+		self.lineEdits['at'].setText(str(self.item.getRealAt()))
 		self.lineEdits['Map'].setText(str(self.item.mapColor))
-		self.flipCheckBox.setChecked((self.item.facingRight and self.item.type != 'none') or (not self.item.facingRight and self.item.type == 'none'))
+		ignore_facing = settings.get_option('level/entity_none_ignore_facing', False)
+		if(ignore_facing):
+			self.flipCheckBox.setChecked((self.item.facingRight and self.item.type != 'none') or (not self.item.facingRight and self.item.type == 'none'))
+		else:
+			self.flipCheckBox.setChecked(self.item.facingRight)
 		if(alt != None):
 			self.lineEdits['altitude (y)'].setText(str(alt))
 		else:
@@ -863,13 +893,19 @@ class EntityControlWidget(QtWidgets.QWidget):
 		
 		
 		direction = self.flipCheckBox.isChecked()
-		if self.item.type == 'none': direction = not direction
+		ignore_facing = settings.get_option('level/entity_none_ignore_facing', False)
+		
+		if ignore_facing and self.item.type == 'none': direction = not direction
 		self.item.setDirection(direction)
 		
 		if(self.lineEdits['altitude (y)'].text() != ''):
 			self.item.altitude = int(self.lineEdits['altitude (y)'].text())
 			
-		self.item.setAt(int(self.lineEdits['at'].text()))
+		val = int(self.lineEdits['at'].text())
+		if self.levelEditor.direction == 'left':
+			self.item.setAt(self.levelEditor.fullWidth - val)
+		else:
+			self.item.setAt(val)
 		
 		self.item.updateShadowPos()
 		
@@ -1034,7 +1070,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 		
 	def loadBackground(self, parts, transp=0, z=0):
 		# 0 : {path} 1{xratio} 2{zratio} 3{xposition} 4{zposition} 5{xspacing} 6{zspacing} 7{xrepeat} 8{zrepeat} {transparency} {alpha} {watermode} {amplitude} {wavelength} {wavespeed} 15:{bgspeedratio}
-		ROOT_PATH = os.path.dirname(settings.get_option('general/data_path', ''))
+		ROOT_PATH = LevelEditorWidget.ROOT_PATH
 		path = os.path.join(ROOT_PATH, parts[0])
 		
 		
@@ -1095,7 +1131,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 			pass
 		
 		if(xRepeat == -1):
-			xRepeat = self.fullWidth / (px.width() + xSpacing)
+			xRepeat = self.levelEditor.fullWidth / (px.width() + xSpacing)
 			print("xRepeat was", xRepeat)
 			if(xRepeat <= 1):
 				xRepeat = 1
@@ -1161,7 +1197,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 		
 		path = '/home/piccolo/workspace/OpenBOR/data/bgs/polar/snow4.png'
 		try:
-			ROOT_PATH = os.path.dirname(settings.get_option('general/data_path', ''))
+			ROOT_PATH = LevelEditorWidget.ROOT_PATH
 			path = os.path.join(ROOT_PATH, parts[0])
 		except:
 			pass
@@ -1231,7 +1267,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				xRepeat = 1
 			else:
 			
-				xRepeat = self.fullWidth / (width + xSpacing)
+				xRepeat = self.levelEditor.fullWidth / (width + xSpacing)
 			print("xRepeat was", xRepeat)
 			if(xRepeat <= 1):
 				xRepeat = 1
@@ -1296,7 +1332,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 	def loadLines(self, lines):
 		def processScriptLine():
 			ogLine = pLine.line
-			# print('script', ogLine)
+			# print('processScriptLine', ogLine)
 			ogLineWithoutSpace = ''.join(ogLine.split())
 			parts = ogLineWithoutSpace.split(';') # in case there is mutiple calls
 			ogLineWithoutSpace = parts[0]
@@ -1307,7 +1343,8 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				result = re.search('"ANI_(.*)"', aniID)
 				aniID = result.group(1)
 				# print(e.name, aniID)
-				e.changeAnimation(aniID, True)
+				e.changeAnimation(aniID.lower(), True)
+				e.actualizeFrame()
 			elif(parts[0].startswith('changeentityproperty')):
 				# changeentityproperty(self, "animation", openborconstant("ANI_FREESPECIAL1")); // Another man
 				parts = ogLineWithoutSpace.split(',')
@@ -1316,7 +1353,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				result = re.search('"ANI_(.*)"', aniID)
 				aniID = result.group(1)
 				# print(e.name, aniID)
-				e.changeAnimation(aniID, True)
+				e.changeAnimation(aniID.lower(), True)
 			elif(parts[0].startswith('setentityvar')):
 				# setentityvar(getlocalvar("self"), "activeAnimationID", openborconstant("ANI_freespecial2"));
 				
@@ -1327,21 +1364,21 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				aniID = result.group(1)
 				
 				# e.changeAnimation(aniID, True, True)
-				e.changeAnimation(aniID, True)
+				e.changeAnimation(aniID.lower(), True)
 				# e.timer = 0
-				# e.setAt(0)
+				# eif(self.levelEditor.direction == 'left'):.setAt(0)
 				# e.actualizeFrame()
 				# print("setentityvar activeAnimationID", e.name, aniID, aniID in e.anims)
 				# if('round' in e.name): print(e.anims[aniID])
 				
 				
 		
-		ROOT_PATH = os.path.dirname(settings.get_option('general/data_path', ''))
+		ROOT_PATH = LevelEditorWidget.ROOT_PATH 
 		self.levelEditor.scene.clear()
 		
 		
 		loadEntities = True
-		processScript = False
+		processScript = settings.get_option('level/process_script', True)
 		
 		
 		self.levelEditor.walls = []
@@ -1361,7 +1398,9 @@ class WallControlWidget(QtWidgets.QScrollArea):
 		self.levelEditor.panelOrder = [0]
 		self.levelEditor.frontPanelPos = 0
 		self.levelEditor.waits = [0]
+		self.levelEditor.waits_items = []
 		self.levelEditor.spawn_players = {}
+		self.levelEditor.direction = 'right'
 		nextAt = None
 		part = None
 		previousFirstPart = None
@@ -1389,20 +1428,25 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				if(loadEntities and processScript): processScriptLine()
 			
 			if part.lower() == 'at':
+				atVal = int(pLine.next())
+				# if(self.levelEditor.direction == 'left'):
+				# 	atVal = self.fullWidth - atVal
+					
 				if nextAt == 'group':
 					group = self.levelEditor.groups[-1]
-					group.at(int(pLine.next()))
+					group.at(atVal)
 					self.levelEditor.scene.addItem(group)
 				elif nextAt == 'wait':
 					wait = Wait()
-					waitPos = int(pLine.next())
+					waitPos = atVal
 					wait.at(waitPos)
 					self.levelEditor.waits.append(waitPos)
 					self.levelEditor.scene.addItem(wait)
+					self.levelEditor.waits_items.append(wait)
 				elif nextAt == 'spawn':
 					if(loadEntities):
 						e = self.levelEditor.entities[-1]
-						e.setAt(int(pLine.next()))
+						e.setAt(atVal)
 						self.levelEditor.scene.addItem(e)
 						# self.levelEditor.scene.addItem(e.frameItem)
 				elif nextAt == None and previousFirstPart not in ('light', 'music', 'shadowopacity', 'scrollx', 'shadowcolor', 'shadowalpha', 'scrollz', 'blockade' ):
@@ -1419,9 +1463,10 @@ class WallControlWidget(QtWidgets.QScrollArea):
 						self.levelEditor.logWarning('Problem with spawn point : Entity ' + e.name + ' at line ' + str(e.line) + ' has no "coords" set')
 				
 				if(loadEntities):
-					e = Entity(pLine.next(), i, self.levelEditor, defaultAnim="idle", loadAllAnims=True, offset=True)
+					e = Entity(pLine.next().lower(), i, self.levelEditor, defaultAnim="idle", loadAllAnims=True, offset=True)
 					if e.forceFacing == None:
-						if e.type != 'none':
+						ignore_facing = settings.get_option('level/entity_none_ignore_facing', False)
+						if (not ignore_facing or e.type != 'none'):
 							e.setDirection(False)
 						# else:
 						# 	e.setDirection(True)
@@ -1437,9 +1482,10 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				if(hasattr(self.levelEditor, 'z')):
 					offset = int(self.levelEditor.z['xMin'])
 				x = parseInt(pLine.next())
+				
 				z = parseInt(pLine.next())
 				
-				self.levelEditor.spawn_players[part[-1]] = (x, z+offset)
+				self.levelEditor.spawn_players[part[-1]] = [x, z+offset]
 			
 			
 			elif part.lower() == 'coords':
@@ -1457,6 +1503,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 						e.z = 0
 						self.levelEditor.logWarning('Problem at line ' + str(i) + ' : z coords missing or not integer.')
 					e.altitude = pLine.next()
+					e.setZValue(e.z)
 					if(e.altitude!=None): e.altitude = int(e.altitude)
 				
 				
@@ -1501,8 +1548,9 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				if(nextAt != 'spawn'): continue
 				mapColor = int(pLine.next())
 				# print('map', e.name, mapColor, e.x, e.z)
+				e.mapColor = mapColor
 				if mapColor < len(e.palettes):
-					e.mapColor = mapColor
+					
 					e.setPalette(e.palettes[mapColor])
 				else:
 					self.levelEditor.logWarning('Problem at line ' + str(i) + ' : palette (map) does not exist')
@@ -1607,8 +1655,14 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				for letter in order:
 					letterMin = letter.lower()
 					self.levelEditor.panelOrder.append(corres[letterMin])
+					
+			
+			elif part.lower() == 'direction':
+				self.levelEditor.direction = pLine.next()
+				if(self.levelEditor.direction == "leftright"): self.levelEditor.direction = "left"
 
 		
+		self.screenWidth = 0
 		xOffset = 0
 		first = True
 		for i in self.levelEditor.panelOrder:
@@ -1622,6 +1676,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 				panelHeight = image.pixmap().height()
 			
 				width, height = LevelEditorWidget.RESOLUTIONS[self.levelEditor.videoMode]
+				self.screenWidth = width
 				print('video mode', width, height, self.levelEditor.videoMode)
 				self.levelEditor.screenItem = QtWidgets.QGraphicsRectItem(xOffset, panelHeight-height, width, height)
 				self.levelEditor.screenItem.setZValue(PANEL_Z)
@@ -1635,11 +1690,34 @@ class WallControlWidget(QtWidgets.QScrollArea):
 			xOffset += image.pixmap().width()
 		
 		
-		self.fullWidth = xOffset
+		self.levelEditor.fullWidth = xOffset
 		#self.fullWidth = 5000
 		
 		
-		print("self.fullWidth", self.fullWidth)
+		
+		
+		
+		print("self.fullWidth", self.levelEditor.fullWidth, self.levelEditor.direction)
+		
+		
+		if(self.levelEditor.direction == 'left'):
+			
+			for key in self.levelEditor.spawn_players:
+				self.levelEditor.spawn_players[key][0] = self.levelEditor.fullWidth  -self.levelEditor.spawn_players[key][0]
+			
+			
+			
+			for item in self.levelEditor.waits_items:
+				
+				item.setAt(self.levelEditor.fullWidth - item.atValue)
+				
+			for item in self.levelEditor.entities:
+				item.atTranslate = self.levelEditor.fullWidth
+				item.xTranslate = -self.screenWidth
+				item.setAt(self.levelEditor.fullWidth -   item.at)
+			
+			for item in self.levelEditor.groups:
+				item.setAt(self.levelEditor.fullWidth - item.atValue)
 		
 		
 		self.levelEditor.showGroupMenu.clear()
@@ -1679,12 +1757,12 @@ class WallControlWidget(QtWidgets.QScrollArea):
 		if(hasattr(self.levelEditor, 'z')):
 			print("self.z", self.levelEditor.z)
 		
-			self.xMin = QtWidgets.QGraphicsLineItem(0.0, float(self.levelEditor.z['xMin']) , float(self.fullWidth), float(self.levelEditor.z['xMin']))
+			self.xMin = QtWidgets.QGraphicsLineItem(0.0, float(self.levelEditor.z['xMin']) , float(self.levelEditor.fullWidth), float(self.levelEditor.z['xMin']))
 			self.xMin.setZValue(9999)
 			self.xMin.setPen(QtGui.QPen(QtGui.QColor(240,140,120)))
 			self.levelEditor.scene.addItem(self.xMin)
 			
-			self.xMax = QtWidgets.QGraphicsLineItem(0.0, float(self.levelEditor.z['xMax']) , float(self.fullWidth), float(self.levelEditor.z['xMax']))
+			self.xMax = QtWidgets.QGraphicsLineItem(0.0, float(self.levelEditor.z['xMax']) , float(self.levelEditor.fullWidth), float(self.levelEditor.z['xMax']))
 			self.xMax.setZValue(9999)
 			self.xMax.setPen(QtGui.QPen(QtGui.QColor(150,100,255)))
 			self.levelEditor.scene.addItem(self.xMax)
@@ -1777,8 +1855,8 @@ class WallControlWidget(QtWidgets.QScrollArea):
 		
 	def update(self):
 		if self.item is None: return
-		#self.item.xOffset = int(self.lineEdits['xOffset'].text())
-		#self.item.zOffset = int(self.lineEdits['zOffset'].text())
+		self.item.xOffset = int(self.lineEdits['xOffset'].text()) - int(self.item.x())
+		self.item.zOffset = int(self.lineEdits['zOffset'].text()) - int(self.item.y())
 		self.item.coords['upperLeft'] = int(self.lineEdits['upperLeft'].text())
 		self.item.coords['lowerLeft'] = int(self.lineEdits['lowerLeft'].text())
 		self.item.coords['upperRight'] = int(self.lineEdits['upperRight'].text())
@@ -1827,6 +1905,16 @@ class LevelControlWidget(QtWidgets.QWidget):
 		a.stateChanged.connect(self.hideEntitiesShadow)
 		layout.addRow(a)
 		
+		self.lockGeometryState = False
+		c = QtWidgets.QCheckBox(_('Lock geometry'))
+		c.stateChanged.connect(self.lockGeometry)
+		layout.addRow(c)
+		
+		self.lockEntitiesState = False
+		c = QtWidgets.QCheckBox(_('Lock entities'))
+		c.stateChanged.connect(self.lockEntities)
+		layout.addRow(c)
+		
 		
 		label = QtWidgets.QLabel('HIDE GEOMETRY')
 		label.setStyleSheet('QLabel { font-weight:bold; margin-top:20px;}');
@@ -1872,6 +1960,9 @@ class LevelControlWidget(QtWidgets.QWidget):
 		layout.addRow(label)
 		
 		
+
+		
+		
 		#layout.addRow(self.logWidget)
 		# self.logWidget.setFixedWidth(300)
 		
@@ -1886,6 +1977,24 @@ class LevelControlWidget(QtWidgets.QWidget):
 			self.levelEditor.graphicView.setDragMode(QtWidgets.QGraphicsView.NoDrag)
 			
 		
+	def lockGeometry(self, state):
+		if(state != None) : self.lockGeometryState = state == QtCore.Qt.Checked
+		
+		for p in [*self.levelEditor.walls, *self.levelEditor.basemaps, *self.levelEditor.holes]:
+			p.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, not self.lockGeometryState);
+			p.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, not self.lockGeometryState);
+			
+			if(hasattr(p, 'dots')):
+				for dot in p.dots:
+					if(self.lockGeometryState) : dot.hide()
+					else : dot.show()
+					
+	def lockEntities(self, state):
+		if(state != None) : self.lockEntitiesState = state == QtCore.Qt.Checked
+		
+		for p in [*self.levelEditor.entities]:
+			p.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, not self.lockEntitiesState);
+			p.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, not self.lockEntitiesState);
 		
 	def loadHideButtons(self):
 		

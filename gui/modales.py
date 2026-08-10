@@ -7,7 +7,7 @@ from PyQt5 import QtWidgets, QtGui, QtCore
 from gui.util import FileInput
 from gui.settings.fontselector import FontSelector
 
-VERSION = '0.5.25 (03/03/24)'
+VERSION = settings.VERSION
 
 
 class ShortcutSettingsWidget(QtWidgets.QWidget):
@@ -100,6 +100,9 @@ class ShortcutSettingsWidget(QtWidgets.QWidget):
 			settings.set_option('shortcuts/run_program_' + str(i), w.text())
 
 
+
+
+
 class EditorSettingsWidget(QtWidgets.QWidget):
 	def __init__(self):
 		QtWidgets.QWidget.__init__(self)
@@ -140,6 +143,37 @@ class EditorSettingsWidget(QtWidgets.QWidget):
 		self.fs.save()
 		
 		
+class AppSettingsWidget(QtWidgets.QWidget):
+	def __init__(self):
+		QtWidgets.QWidget.__init__(self)
+		l = QtWidgets.QVBoxLayout()
+
+		appFont = QtWidgets.QApplication.font()
+		self.fs = FontSelector('gui', appFont.family(), appFont.pointSize())
+		l.addWidget(self.fs, 1)
+
+		tip = QtWidgets.QLabel(_("Tip : this font applies to the whole app interface (menus, panels, dialogs...). To change the font of the text editor, go to the section Editor -> Fonts and colors."))
+		tip.setWordWrap(True)
+		tip.setStyleSheet('color: gray; font-style: italic;')
+		l.addWidget(tip)
+
+		self.setLayout(l)
+
+	def save(self):
+		self.fs.save()
+
+		# hot-reload : apply the new font to the whole app, no restart needed
+		app = QtWidgets.QApplication.instance()
+		appFont = app.font()
+		appFont.setFamily(settings.get_option('gui/font_family', appFont.family()))
+		appFont.setPointSize(settings.get_option('gui/font_size', appFont.pointSize()))
+		app.setFont(appFont)
+		# re-applying the stylesheet forces a repolish of every existing widget :
+		# with an app stylesheet active, widgets created before setFont() would
+		# keep their old font otherwise (we reuse app.styleSheet() to preserve the theme part)
+		app.setStyleSheet(app.styleSheet())
+
+
 class AutoBackupWidget(QtWidgets.QWidget):
 	def __init__(self):
 		QtWidgets.QWidget.__init__(self)
@@ -337,6 +371,12 @@ class MiscSettingsWidget(QtWidgets.QWidget):
 		lay.addWidget(self.ignoreCommands, 2, 1)
 		lay.addWidget(QtWidgets.QLabel("(Use coma (,) as separator)"), 3, 0)
 		
+		
+		lay.addWidget(QtWidgets.QLabel(_("Null collision format")), 4, 0)
+		null_collision_format = settings.get_option('entity/null_collision_format', 'none')
+		self.nullCollisionFormat = QtWidgets.QLineEdit(null_collision_format)
+		lay.addWidget(self.nullCollisionFormat, 4, 1)
+		
 		self.setLayout(lay)
 		
 	def save(self):
@@ -350,6 +390,10 @@ class MiscSettingsWidget(QtWidgets.QWidget):
 		else:
 			tab = val.split(',')
 		settings.set_option('entity/ignore_commands', tab)
+		
+		
+		val = self.nullCollisionFormat.text()
+		null_collision_format = settings.set_option('entity/null_collision_format', val)
 		
 		
 
@@ -377,6 +421,8 @@ class SettingsEditor(QtWidgets.QDialog):
 			self.sections.append(parent, node)
 			return node
 
+		appNode = addSection('application', _('Application'))
+		addSection('application', _('Font'), None, appNode)
 		editorNode = addSection('editor', _('Editor'))
 		addSection('editor', _('Fonts and colors'), None, editorNode)
 		addSection('dialog', _('Dialog editor'))
@@ -430,6 +476,12 @@ class SettingsEditor(QtWidgets.QDialog):
 		
 		
 		
+		# APPLICATION (app font)
+		w = AppSettingsWidget()
+		self.widgetLayout.addWidget(w, 1)
+		w.hide()
+		self.widgets['application'] = w
+
 		# FONT & EDITOR
 		w = EditorSettingsWidget()
 		self.widgetLayout.addWidget(w, 1)
@@ -474,6 +526,7 @@ class SettingsEditor(QtWidgets.QDialog):
 		#settings.set_option('general/datapath', self.basePath.text())
 		settings.set_option('dialog/format', self.dialogFormatCB.currentIndex())
 		
+		self.widgets['application'].save()
 		self.widgets['editor'].save()
 		self.widgets['level'].save()
 		self.widgets['shortcuts'].save()
@@ -1015,8 +1068,164 @@ class CreateFileDialog(QtWidgets.QDialog):
 		
 		
 
+class InsertHeaderDialog(QtWidgets.QDialog):
+
+	def __init__(self, editor, commentPrefix='#'):
+		self.editor = editor
+		self.commentPrefix = commentPrefix
+		QtWidgets.QDialog.__init__(self)
+		self.setWindowTitle(_('Insert Heading'))
+
+		lay = QtWidgets.QFormLayout()
+		self.setLayout(lay)
+
+		# Title input
+		self.titleEntry = QtWidgets.QLineEdit()
+		self.titleEntry.setPlaceholderText(_('Enter your title here'))
+		self.titleEntry.textChanged.connect(self.updatePreview)
+		lay.addRow(_('Title'), self.titleEntry)
+
+		# Style selection
+		self.styleCombo = QtWidgets.QComboBox()
+		self.styleCombo.addItems(['Unicode (box)', 'Block', 'Block Inverse', 'ASCII'])
+		self.styleCombo.setCurrentIndex(settings.get_option('code-editor/heading_style', 0))
+		self.styleCombo.currentIndexChanged.connect(self.updatePreview)
+		lay.addRow(_('Style'), self.styleCombo)
+
+		# Comment prefix
+		self.prefixEntry = QtWidgets.QLineEdit()
+		self.prefixEntry.setText(commentPrefix)
+		self.prefixEntry.textChanged.connect(self.updatePreview)
+		lay.addRow(_('Comment prefix'), self.prefixEntry)
+
+		# Width options
+		widthLayout = QtWidgets.QHBoxLayout()
+		self.autoWidthRadio = QtWidgets.QRadioButton(_('Auto'))
+		self.fixedWidthRadio = QtWidgets.QRadioButton(_('Fixed'))
+		widthAuto = settings.get_option('code-editor/heading_width_auto', True)
+		self.autoWidthRadio.setChecked(widthAuto)
+		self.fixedWidthRadio.setChecked(not widthAuto)
+		self.widthSpin = QtWidgets.QSpinBox()
+		self.widthSpin.setRange(20, 200)
+		self.widthSpin.setValue(settings.get_option('code-editor/heading_width', 60))
+		self.widthSpin.setEnabled(not widthAuto)
+		self.autoWidthRadio.toggled.connect(lambda checked: self.widthSpin.setEnabled(not checked))
+		self.autoWidthRadio.toggled.connect(self.updatePreview)
+		self.widthSpin.valueChanged.connect(self.updatePreview)
+		widthLayout.addWidget(self.autoWidthRadio)
+		widthLayout.addWidget(self.fixedWidthRadio)
+		widthLayout.addWidget(self.widthSpin)
+		lay.addRow(_('Width'), widthLayout)
+
+		# Padding
+		self.paddingSpin = QtWidgets.QSpinBox()
+		self.paddingSpin.setRange(1, 20)
+		self.paddingSpin.setValue(settings.get_option('code-editor/heading_padding', 6))
+		self.paddingSpin.valueChanged.connect(self.updatePreview)
+		lay.addRow(_('Padding'), self.paddingSpin)
+
+		# Margin (spaces between comment prefix and box)
+		self.marginSpin = QtWidgets.QSpinBox()
+		self.marginSpin.setRange(0, 50)
+		self.marginSpin.setValue(settings.get_option('code-editor/heading_margin', 0))
+		self.marginSpin.valueChanged.connect(self.updatePreview)
+		lay.addRow(_('Margin'), self.marginSpin)
+
+		# Vertical spacing (empty lines above and below)
+		self.verticalSpacingSpin = QtWidgets.QSpinBox()
+		self.verticalSpacingSpin.setRange(0, 10)
+		self.verticalSpacingSpin.setValue(settings.get_option('code-editor/heading_vertical_spacing', 0))
+		self.verticalSpacingSpin.valueChanged.connect(self.updatePreview)
+		lay.addRow(_('Vertical spacing'), self.verticalSpacingSpin)
+
+		# Preview
+		self.previewText = QtWidgets.QTextEdit()
+		self.previewText.setReadOnly(True)
+		self.previewText.setFont(QtGui.QFont('Monospace', 10))
+		self.previewText.setMinimumHeight(100)
+		self.previewText.setMinimumWidth(400)
+		lay.addRow(_('Preview'), self.previewText)
+
+		buttonBox = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+		buttonBox.accepted.connect(self.accept)
+		buttonBox.rejected.connect(self.reject)
+
+		lay.addRow(buttonBox)
+
+		self.updatePreview()
+
+	def getStyleEnum(self):
+		from guilib.title_box import BoxStyle
+		styles = [BoxStyle.UNICODE, BoxStyle.BLOCK, BoxStyle.BLOCK_INVERSE, BoxStyle.ASCII]
+		return styles[self.styleCombo.currentIndex()]
+
+	def updatePreview(self):
+		from guilib.title_box import generate_title_box
+
+		title = self.titleEntry.text() or 'Example Title'
+		style = self.getStyleEnum()
+		prefix = self.prefixEntry.text()
+		width = None if self.autoWidthRadio.isChecked() else self.widthSpin.value()
+		padding = self.paddingSpin.value()
+		margin = self.marginSpin.value()
+		verticalSpacing = self.verticalSpacingSpin.value()
+
+		try:
+			result = generate_title_box(title, prefix=prefix, style=style, width=width, padding=padding, margin=margin)
+			# Add vertical spacing (empty lines above and below)
+			if verticalSpacing > 0:
+				emptyLines = '\n' * verticalSpacing
+				result = emptyLines + result + emptyLines
+			self.previewText.setPlainText(result)
+		except Exception as e:
+			self.previewText.setPlainText(f'Error: {e}')
+
+	def accept(self):
+		from guilib.title_box import generate_title_box
+
+		title = self.titleEntry.text()
+		if not title:
+			QtWidgets.QMessageBox.warning(self, _('Warning'), _('Please enter a title'))
+			return
+
+		style = self.getStyleEnum()
+		prefix = self.prefixEntry.text()
+		widthAuto = self.autoWidthRadio.isChecked()
+		width = None if widthAuto else self.widthSpin.value()
+		padding = self.paddingSpin.value()
+		margin = self.marginSpin.value()
+		verticalSpacing = self.verticalSpacingSpin.value()
+
+		# Save settings (except title)
+		settings.set_option('code-editor/heading_style', self.styleCombo.currentIndex())
+		settings.set_option('code-editor/heading_width_auto', widthAuto)
+		settings.set_option('code-editor/heading_width', self.widthSpin.value())
+		settings.set_option('code-editor/heading_padding', padding)
+		settings.set_option('code-editor/heading_margin', margin)
+		settings.set_option('code-editor/heading_vertical_spacing', verticalSpacing)
+
+		result = generate_title_box(title, prefix=prefix, style=style, width=width, padding=padding, margin=margin)
+
+		# Add vertical spacing (empty lines above and below)
+		if verticalSpacing > 0:
+			emptyLines = '\n' * verticalSpacing
+			result = emptyLines + result + emptyLines
+
+		# Insert at cursor position
+		cursor = self.editor.textCursor()
+		# Add newline before if not at start of line
+		if cursor.columnNumber() > 0:
+			result = '\n' + result
+		# Add newline after
+		result = result + '\n'
+
+		self.editor.selectedText = result
+
+		QtWidgets.QDialog.accept(self)
+
+
 class GeneratePathsDialog(QtWidgets.QDialog):
-	
+
 	def __init__(self, editor):
 		self.editor = editor
 		QtWidgets.QDialog.__init__(self)
@@ -1067,5 +1276,74 @@ class GeneratePathsDialog(QtWidgets.QDialog):
 		self.editor.selectedText = txt
 		
 		QtWidgets.QDialog.accept(self)
-		
+
 		#return txt
+
+
+class ProjectSettingsDialog(QtWidgets.QDialog):
+
+	def __init__(self, projectName, projectPath):
+		QtWidgets.QDialog.__init__(self)
+		self.projectName = projectName
+		self.projectPath = projectPath
+		self.setWindowTitle(_('Project settings') + ' - ' + projectName)
+		self.setMinimumWidth(500)
+
+		mainLayout = QtWidgets.QVBoxLayout()
+		self.setLayout(mainLayout)
+
+		# --- Search settings ---
+		searchGroup = QtWidgets.QGroupBox(_('File search settings'))
+		searchLayout = QtWidgets.QVBoxLayout()
+		searchGroup.setLayout(searchLayout)
+
+		# Whitelist
+		whitelistLabel = QtWidgets.QLabel(_('Whitelist (only search in these directories, relative to project root, one per line) :'))
+		whitelistLabel.setWordWrap(True)
+		searchLayout.addWidget(whitelistLabel)
+
+		self.whitelistEdit = QtWidgets.QPlainTextEdit()
+		self.whitelistEdit.setPlaceholderText(_('e.g. data/chars\ndata/levels\n(leave empty to search everywhere)'))
+		self.whitelistEdit.setMaximumHeight(100)
+		whitelist = settings.get_option('project/' + projectName + '/search_whitelist', [])
+		self.whitelistEdit.setPlainText('\n'.join(whitelist))
+		searchLayout.addWidget(self.whitelistEdit)
+
+		# Blacklist
+		blacklistLabel = QtWidgets.QLabel(_('Blacklist (ignore files/directories matching these patterns, one per line) :'))
+		blacklistLabel.setWordWrap(True)
+		searchLayout.addWidget(blacklistLabel)
+
+		self.blacklistEdit = QtWidgets.QPlainTextEdit()
+		self.blacklistEdit.setPlaceholderText(_('e.g. .*\n*.1\n*.bak'))
+		self.blacklistEdit.setMaximumHeight(100)
+		blacklist = settings.get_option('project/' + projectName + '/search_blacklist', [])
+		self.blacklistEdit.setPlainText('\n'.join(blacklist))
+		searchLayout.addWidget(self.blacklistEdit)
+
+		blacklistHelpLabel = QtWidgets.QLabel(_('Use * as wildcard. Examples: .* (files starting with dot), *.1 (files ending with .1), __pycache__ (exact name)'))
+		blacklistHelpLabel.setWordWrap(True)
+		blacklistHelpLabel.setStyleSheet("color: gray; font-size: 11px;")
+		searchLayout.addWidget(blacklistHelpLabel)
+
+		mainLayout.addWidget(searchGroup)
+
+		mainLayout.addStretch(1)
+
+		# Buttons
+		buttonBox = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+		buttonBox.accepted.connect(self.accept)
+		buttonBox.rejected.connect(self.reject)
+		mainLayout.addWidget(buttonBox)
+
+	def accept(self):
+		# Parse whitelist
+		whitelist = [line.strip() for line in self.whitelistEdit.toPlainText().split('\n') if line.strip()]
+		settings.set_option('project/' + self.projectName + '/search_whitelist', whitelist)
+
+		# Parse blacklist
+		blacklist = [line.strip() for line in self.blacklistEdit.toPlainText().split('\n') if line.strip()]
+		settings.set_option('project/' + self.projectName + '/search_blacklist', blacklist)
+
+		settings.MANAGER.save()
+		QtWidgets.QDialog.accept(self)

@@ -1,4 +1,14 @@
 import os, sys
+
+overWritePath = None
+
+try:
+	f = open('overwrite-settings-path.ini', 'r')
+	overWritePath = f.read()
+	f.close()
+except:
+	pass
+
 #import glib
 
 #config_home = glib.get_user_config_dir()
@@ -14,19 +24,26 @@ import os, sys
 #data_dir = os.path.dirname(os.path.dirname(__file__)) + os.sep
 APPNAME = 'ob-utils'
 
-home = os.environ.get("XDG_HOME", os.path.expanduser("~"))
-#print(sys.platform)
-if sys.platform == "linux2" or sys.platform == 'linux': # for Linux using the X Server
-	config_home = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config")), APPNAME)
-	data_home = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local", "share")), APPNAME)
-elif sys.platform == "win32": # for Windows
-	home = os.environ.get("USERPROFILE", os.path.expanduser("~"))
-	#config_home = os.path.join(home, ".bullseye")
-	#data_home = os.path.join(home, ".bullseye")
-	config_home = os.path.join(home, APPNAME)
-	config_home = data_home = os.path.join(os.environ.get("APPDATA", "Application Data"), APPNAME)
-elif sys.platform == "darwin": # for MacOS
-	config_home = os.path.join(home, APPNAME)
+if( overWritePath != None):
+	config_home = os.path.join(overWritePath, 'settings');
+	data_home = os.path.join(overWritePath, 'data');
+	
+
+else:
+
+	home = os.environ.get("XDG_HOME", os.path.expanduser("~"))
+	#print(sys.platform)
+	if sys.platform == "linux2" or sys.platform == 'linux': # for Linux using the X Server
+		config_home = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config")), APPNAME)
+		data_home = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local", "share")), APPNAME)
+	elif sys.platform == "win32": # for Windows
+		home = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+		#config_home = os.path.join(home, ".bullseye")
+		#data_home = os.path.join(home, ".bullseye")
+		config_home = os.path.join(home, APPNAME)
+		config_home = data_home = os.path.join(os.environ.get("APPDATA", "Application Data"), APPNAME)
+	elif sys.platform == "darwin": # for MacOS
+		config_home = os.path.join(home, APPNAME)
 
 
 data_thumbnails = os.path.join(data_home, 'thumbnails')

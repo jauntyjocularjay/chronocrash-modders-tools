@@ -1,4 +1,4 @@
-import os, re, time, mimetypes
+import os, re, time, mimetypes, platform
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import *
@@ -9,7 +9,7 @@ from gui.util import FileInput
 
 from gui.portrait import IconViewer, Portrait
 
-from qutepart import EverydayPart
+from gui.main.everydaypart import EverydayPart
 
 from data import ParsedLine
 
@@ -18,6 +18,8 @@ from gui.main.everydayeditor import EverydayEditor
 from gui.entity import EntityEditorWidget
 from gui.level import LevelEditorWidget
 from gui.level.items import Entity
+
+from gui.json_editor import JSONGUIEditor
 
 ROOT_PATH = '/home/piccolo/workspace/OpenBOR/'
 
@@ -32,14 +34,20 @@ class MainEditorWidget(QtWidgets.QWidget):
 		QtWidgets.QWidget.__init__(self)
 		
 		self.core = core
+		
+		self.loaded_projects = {}
 		layout = QtWidgets.QHBoxLayout()
 		splitter = QtWidgets.QSplitter(self)
 		self.splitter = splitter
+		self.splitter.splitterMoved.connect(self.splitterMoved)
 		layout.addWidget(splitter)
 		self.setLayout(layout)
 		layout.setContentsMargins(0, 0, 0, 0)
 		
 		
+		self.currentProject = {'name':'none', 'path':''}
+		self.pending_file_to_open = None
+
 		self.fileSelector = FileSelector(self)
 
 		self.editor = EverydayEditor(self)
@@ -49,9 +57,23 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.setupFavorites()
 
 		self.currentPath = None
+		
+		
 
 		
 		#self.loadProject()
+		
+		
+		leftSide = QtWidgets.QWidget()
+		self.leftSidePanel = leftSide
+		leftLayout = QtWidgets.QVBoxLayout()
+		leftSide.setLayout(leftLayout)
+		leftLayout.setContentsMargins(0, 0, 0, 0)
+		leftLayout.setSpacing(0)
+		leftLayout.addWidget(self.fileSelector.projectFilterBar)
+		
+		leftLayout.addWidget(self.fileSelector, 1)
+		
 		
 		rightSide = QtWidgets.QWidget()
 		rightLayout = QtWidgets.QVBoxLayout()
@@ -62,7 +84,7 @@ class MainEditorWidget(QtWidgets.QWidget):
 		rightLayout.addWidget(self.headerWidget, 0)
 		rightLayout.addWidget(self.editor, 1)
 		
-		self.entityEditor = EntityEditorWidget()
+		self.entityEditor = EntityEditorWidget(self)
 		self.levelEditor = LevelEditorWidget()
 		rightLayout.addWidget(self.entityEditor, 1)
 		rightLayout.addWidget(self.levelEditor, 1)
@@ -73,16 +95,31 @@ class MainEditorWidget(QtWidgets.QWidget):
 		
 		
 		
+		self.JSON_editor = JSONGUIEditor(self)
+		rightLayout.addWidget(self.JSON_editor, 1)
+		self.JSON_editor.hide()
 		
-		splitter.addWidget(self.fileSelector)
+		
+		
+		
+		splitter.addWidget(leftSide)
 		splitter.addWidget(rightSide)
 		
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("F1")), self, self.fileSelector.switchProjectFilter)
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+T")), self, self.openNewTab)
 		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+D", "Edit|Comment")), self, self.editor.comment)
 		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Shift+Ctrl+D", "Edit|Uncomment")), self, self.editor.uncomment)
-		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+F", "Edit|Find")), self, self.editor.focusForSearch)
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+F", "Edit|Find")), self, self.focusForSearch)
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+G")), self, self.focusForGoTo)
 		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+R", "Edit|Replace")), self, self.editor.focusForReplace)
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+G")), self, self.focusForGoTo)
 		
 		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+W", "File|Close")), self, self.fileSelector.close)
+		
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+PgDown")), self, self.editor.selectPreviousTab)
+		QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+PgUp")), self, self.editor.selectNextTab)
+		
+		# QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+S", "File|Save")), self, self.core.saveFile)
 
 		
 		#QtWidgets.QShortcut(QtGui.QKeySequence(self.tr("Ctrl+H", "File|Close")), self, self.editor.editor.highlightCurrentWord)
@@ -90,7 +127,64 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.splitter.setStretchFactor(0,0)
 		self.splitter.setStretchFactor(1,1)
 		
+		
+		self.temp_look_folder = None
+		
+		self.clearingCache = False
+		
 		self.currentView = 'text'
+	
+	def openNewTab(self):
+		# self.currentProject['path']
+		fd = self.fileSelector.addFile(os.path.dirname(self.editor.editor.fd.path) + '/New')
+		fd.lines = []
+		self.loadFile(fd, False)
+		
+	def reloadSplitterPos(self):
+		splitterPos = settings.get_option('gui/splitter_pos', 0)
+		if(splitterPos != 0):
+			self.splitter.moveSplitter(splitterPos, 1)
+	
+	
+	def splitterMoved(self, pos, index):
+		if(self.isVisible()):
+			settings.set_option('gui/splitter_pos', pos)
+			settings.set_option('gui/splitter_index', index)
+		
+	
+	def addFavorite(self):
+		text = QtWidgets.QInputDialog.getText(self, _("Create animation"), _("Name"))[0]
+		
+		if(text != ''):
+			data_path = settings.get_option('general/data_path', '')
+			saved_favorites = settings.get_option('misc/shortcuts', [])
+			todoPath = os.path.join(data_path, text + '.txt')
+			saved_favorites.append({'key':text, 'path':todoPath});
+			
+			
+			settings.set_option('misc/shortcuts', saved_favorites)
+			
+			fd = File(todoPath)
+			fd.loadFromDisk(True)
+			self.favorites[text] = fd
+			
+			return text
+		return ''
+	
+	def focusForSearch(self):
+		# print("focusForSearch", self.currentView)
+		if(self.currentView == 'favorite'):
+			self.favEditor.focusForSearch()
+		# elif(self.core.mode == 'backupViewer'):
+		# 	self.core.backupViewer.editor.focusForSearch()
+		if self.currentView == 'text' or self.currentView == 'text|text':
+			self.editor.focusForSearch()
+		elif self.currentView == 'anim':
+			self.entityEditor.focusForSearch()
+			
+	def focusForGoTo(self):
+		if self.currentView == 'text' or self.currentView == 'text|text':
+			self.editor.focusForSearch(True)
 		
 	def backupUnsaved(self):
 		self.updateFD()
@@ -104,6 +198,12 @@ class MainEditorWidget(QtWidgets.QWidget):
 			if not fd.saved:
 				fd.save()
 				#fd.backupUnsaved()
+
+		# Auto-save notes
+		from gui.main.fileselector import FileDB
+		for fd in FileDB._allNotes.values():
+			if not fd.saved:
+				fd.save()
 	
 	def close(self, all=False):
 		self.levelEditor.looping = False
@@ -112,10 +212,13 @@ class MainEditorWidget(QtWidgets.QWidget):
 	
 	
 	def clearCache(self):
+		self.clearingCache = True
 		self.entityEditor.pixmapCache.clear()
+		self.entityEditor.frameEditor.opponent = None
 		LevelEditorWidget.PIXMAP_CACHE.clear()
 		Entity.PIXMAP_CACHE.clear()
 		Entity.LOADED_MODELS_REFERENCE.clear()
+		self.clearingCache = False
 		
 	def editNew(self):
 		fd = self.fileSelector.addFile('New')
@@ -128,15 +231,59 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.entityEditor.frameEditor.onionSkinEditor.reloadModels()
 		
 		
-	def loadProject(self, path=None):
+	def loadProject(self, project=None):
 
-		if path is None:
+		if project is None:
 			path = settings.get_option('general/data_path', '')
+		else:
+			path = project['path']
+			
+		self.currentProject = project
+		
+		
+		self.switchProjectCore(path)
+		
+		global ROOT_PATH
+		
+		self.fileSelector.projectChanged(ROOT_PATH)
+		
+		if(not 'is_OpenBOR' in project or project['is_OpenBOR']):
+			self.fileSelector.setMode('library')
+			self.fileSelector.loadLibrary(False)
+		else:
+			self.fileSelector.setMode('opened')
+
+		self.fileSelector.hydrateProjectSessionFiles(project)
+		
+		self.menuBar.addProjectQuickAccess(project)
+		
+		# self.fileSelector.loadLibrary(True)
+		
+		# self.reloadSplitterPos()
+		
+		
+	def switchProjectCore(self, path, fd=None):
+		
+		if(fd != None):
+			if(fd.projectName == 'Unknown'): return
+			path = self.loaded_projects[ fd.projectName]['path']
 		
 		global ROOT_PATH
 		print('loading project', path)
 		ROOT_PATH = os.path.dirname(path)
 		print('root path = ', ROOT_PATH)
+		
+		for project in self.loaded_projects.values():
+			# print("comparing projects")
+			# print(project['path'])
+			# print(path)
+			# self.core.notify(project['path'] + ' VS ' + ROOT_PATH)
+			if project['path'] == path:
+				# self.core.notify("Changing current project")
+				self.currentProject = project
+		
+
+		
 		FileSelector.ROOT_PATH = ROOT_PATH
 		EntityEditorWidget.ROOT_PATH = ROOT_PATH
 		
@@ -145,29 +292,40 @@ class MainEditorWidget(QtWidgets.QWidget):
 		
 		self.entityEditor.projectChanged(ROOT_PATH)
 		
-		self.fileSelector.projectChanged(ROOT_PATH)	
-		self.fileSelector.setMode('library')
-		self.fileSelector.loadLibrary(False)
+		self.entitiesHaveBeenReloaded()
 		
-		self.menuBar.addProjectQuickAccess(path)
-		# self.fileSelector.loadLibrary(True)
+		self.headerWidget.toggleButtons()
+		
+		
 		
 	def loadFile(self, fd, rel=True):
+
+		self.temp_look_folder = None
+
 		print('\nMAIN WIDGET loading file', fd)
 		#if(type(f) == str) : path = f
 		path = fd.path
+		if hasattr(fd, 'selectExclusive'):
+			fd.selectExclusive()
 		self.headerWidget.setInfo(fd)
 		
 		self.updateFD()
+		# self.core.notify('main.loadFile', 'warning')
+		# WARNING Don't think this one is necessary, done by setCurrent(fd) later (because recentBar is updated when focused change, check eventFilter in EverydayEditor)
+		# self.editor.addRecentFile(fd)
 		
-		if(fd.category != 'Level' and self.currentView in ('level')):
+		# New file is not level, but previous was, so we wan't stay in Level view
+		if(fd.category != 'Level' and self.currentView in ('level') and fd.lines != None):
 			self.setView("text")
 			self.headerWidget.textAction.setChecked(True)
 			
-		if(fd.category != 'Entity' and self.currentView in ('anim', 'frame')):
+		if(fd.category != 'Entity' and self.currentView in ('anim', 'frame') and fd.lines != None):
 			self.setView("text")
 			self.headerWidget.textAction.setChecked(True)
 
+
+		
+			
 		
 		#if(fd.category == 'Level' and self.currentView in ('anim', 'frame')):
 			#self.setView("text")
@@ -179,37 +337,58 @@ class MainEditorWidget(QtWidgets.QWidget):
 
 		
 		self.editor.setCurrent(fd)
+		
+		
+		
 		if self.currentView in ('anim', 'frame'):
+			self.switchProjectCore(None, fd)
 			self.entityEditor.loadLines(fd.lines)
 		elif self.currentView == 'level':
+			self.switchProjectCore(None, fd)
 			# print('z', fd.z)
 			self.levelEditor.loadFile(fd)
+		elif self.currentView == 'JSON':
+			self.JSON_editor.loadFile(fd)
 			
 			
 		if self.currentView == "favorite":
 			self.setView("text")
+			self.headerWidget.textAction.setChecked(True)
+		
+			act = self.headerWidget.mainActionGroup.checkedAction()
+			if(act != None):
+				act.setChecked(False)
 			
 		
 
 
-	def openFile(self, path=None):
+	def openFile(self, path=None, defaultCategory="file"):
 		
 		if path is None:
 			current = self.editor.current()
-			if current is None or current.path is None:
+			
+			if(self.temp_look_folder != None):
+				lookFolder = self.temp_look_folder
+			
+			elif current is None or current.path is None:
 				lookFolder = ROOT_PATH
 			else:
 				lookFolder = os.path.dirname(self.editor.current().path)
+				
 			path = QtWidgets.QFileDialog.getOpenFileName(self, directory=lookFolder)[0]
 			
 		
 		if(path is not None and path != ''):
-			
+
 			fd = self.fileSelector.addFile(path)
-			
+			if fd is None:  # User chose to open another project
+				return
+
+			fd.category = defaultCategory
+
 			self.fileSelector.setSelectedFile(fd)
 			fd.loadFromDisk()
-			
+
 			self.loadFile(fd, False)
 		
 	def remove(self, fd):
@@ -224,11 +403,15 @@ class MainEditorWidget(QtWidgets.QWidget):
 		else:
 			self.updateFD()
 			current = self.editor.current()
-			if current is None or current.path is None:
+			if current is None:
+				return
+			if current.path is None and not hasattr(current, 'noteId'):
 				self.saveAs()
 			else:
 				current.lines = self.editor.getLines()
 				current.save()
+
+				self.editor.updateSaveIcon()
 			
 	def saveAs(self):
 		current = self.editor.current()
@@ -251,6 +434,9 @@ class MainEditorWidget(QtWidgets.QWidget):
 
 			
 			fd = self.fileSelector.addFile(path)
+			if fd is None:  # User chose to open another project
+				return
+
 			self.fileSelector.setSelectedFile(fd)
 			fd.loadFromDisk()
 			self.loadFile(fd, False)
@@ -262,7 +448,7 @@ class MainEditorWidget(QtWidgets.QWidget):
 	def setupFavorites(self):
 		
 		self.favorites = {}
-		self.favEditor = EverydayEditor(self)
+		self.favEditor = EverydayEditor(self, {'disable_contentIndexPanel':True})
 		
 		
 		
@@ -274,6 +460,13 @@ class MainEditorWidget(QtWidgets.QWidget):
 		
 		
 		favorites = {'Log': logPath, 'Todo':todoPath}
+		
+		saved_favorites = settings.get_option('misc/shortcuts', [])
+		
+		
+		for fav in saved_favorites:
+			
+			favorites[fav['key']] = fav['path']
 		
 		numberOfTodoShortcuts = settings.get_option('misc/number_of_todo_shortcuts', 1)
 		for i in range(1, numberOfTodoShortcuts):
@@ -294,7 +487,7 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.updateFD()
 		self.headerWidget.setInfo( self.editor.current())
 		
-		widgets = [self.editor, self.entityEditor, self.levelEditor, self.favEditor]
+		widgets = [self.editor, self.entityEditor, self.levelEditor, self.favEditor, self.JSON_editor]
 	
 		if view == 'text':
 			self.editor.setDoubleView(False)
@@ -302,6 +495,7 @@ class MainEditorWidget(QtWidgets.QWidget):
 			
 			for w in widgets : w.hide()
 			self.editor.show()
+			# self.reloadSplitterPos()
 			
 			
 		elif view == 'text|text':
@@ -316,6 +510,10 @@ class MainEditorWidget(QtWidgets.QWidget):
 		elif view == 'anim':
 			for w in widgets : w.hide()
 			lines = self.editor.getLines()
+			
+			self.switchProjectCore(None, self.editor.current())
+			
+			
 			self.entityEditor.loadLines(lines)
 			
 			# Load anim we were editing in text view
@@ -341,12 +539,19 @@ class MainEditorWidget(QtWidgets.QWidget):
 				self.levelEditor.z = self.editor.current().z
 			if(hasattr(self.editor.current(), 'HUD_settings')):
 				self.levelEditor.HUD_settings = self.editor.current().HUD_settings
+			self.switchProjectCore(None, self.editor.current())
 			self.levelEditor.loadLines(self.editor.getLines())
 		elif view == 'favorite':
 			for w in widgets : w.hide()
 			self.favEditor.show()
 			self.favEditor.setCurrent(self.favorites[self.sender().data()])
 			#self.favEditor.editor.setFocus()
+			
+		elif view == 'JSON':
+			for w in widgets : w.hide()
+			self.JSON_editor.show()
+			self.JSON_editor.loadFile(self.editor.current())
+
 
 			
 		self.currentView = view
@@ -357,12 +562,17 @@ class MainEditorWidget(QtWidgets.QWidget):
 		data1 = dict(themes.EDITOR_THEME.items('Editor Colors'))
 		data2 = dict(themes.EDITOR_THEME.items('Default Item Styles'))
 		fontColor = data2['Normal'].split(',')
+		
+		
+		fontFamilies = {'Windows':'Courier New',
+                        'Darwin': 'Menlo'}
+		fontFamily = fontFamilies.get(platform.system(), 'Monospace')
 
 		css = ["background-color:rgb(" + str( data1['Color Background']) + ")",
 			"selection-background-color: rgb(" + str( data1['Color Selection']) + ")",
 			"color: #" + str( fontColor[0]),
 			"selection-color: #" + str( fontColor[1]),
-			"font-family:" + settings.get_option("editor/font_family", "Courier")
+			"font-family:" + settings.get_option("editor/font_family", fontFamily)
 			]
 		
 
@@ -376,7 +586,8 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.editor.themeData = {'css':css, 'searchColor':QtGui.QColor(rS, gS, bS), 'currentLine':QtGui.QColor(r, g, b)}
 		
 		for editor in (self.editor.getEditors() + [self.entityEditor.editor]):
-			editor.setStyleSheet('QPlainTextEdit {' + ';'.join(css) + '}')
+			if(not settings.DISABLE_STYLE_SHEET):
+				editor.setStyleSheet('QPlainTextEdit {' + ';'.join(css) + '}')
 			editor.searchColor = QtGui.QColor(rS, gS, bS)
 			editor.highlightColor = QtGui.QColor(r, g, b)
 			editor._updateExtraSelections()
@@ -404,6 +615,9 @@ class MainEditorWidget(QtWidgets.QWidget):
 		elif(self.currentView == 'level'):
 			self.levelEditor.looping = False
 			lines = self.levelEditor.rebuildText()
+			self.editor.setLines(lines)
+		elif(self.currentView == 'JSON'):
+			lines = self.JSON_editor.rebuildText()
 			self.editor.setLines(lines)
 		self.editor.updateFD()
 		
@@ -456,15 +670,17 @@ class HeaderWidget(QtWidgets.QWidget):
 		
 		
 		#buttonGroup = QtWidgets.QButtonGroup()
+		
 		actionGroup = QtWidgets.QActionGroup(self)
+		self.mainActionGroup = actionGroup
 		self.buttonBar = QtWidgets.QToolBar()
 		
 		smallScreenMode = settings.get_option('gui/small_screen', False)
 		if smallScreenMode:
 			self.buttonBar.setStyleSheet('QToolButton#MainToolButton {  margin:0px 0px; padding: 0px 0px; }')
-			labels = {'Text':'T', 'Text|Text':'T|T', 'Animation':'A', 'Scripts':'S', 'Level':'L'}
+			labels = {'Text':'T', 'Text|Text':'T|T', 'Animation':'A', 'Scripts':'S', 'Level':'L', 'JSON':'J'}
 		else:
-			labels = {'Text':'Text', 'Text|Text':'Text|Text', 'Animation':'Animation', 'Scripts':'Scripts', 'Level':'Level'}
+			labels = {'Text':'Text', 'Text|Text':'Text|Text', 'Animation':'Animation', 'Scripts':'Scripts', 'Level':'Level', 'JSON':'JSON'}
 		b1 = self.buttonBar.addAction(labels['Text'], lambda:self.parent.setView('text'))
 		b1.setToolTip(_('Text'))
 		b1bis = self.buttonBar.addAction(labels['Text|Text'], lambda:self.parent.setView('text|text'))
@@ -477,6 +693,11 @@ class HeaderWidget(QtWidgets.QWidget):
 		b5 = self.buttonBar.addAction(labels['Level'], lambda:self.parent.setView('level'))
 		b5.setToolTip('Level')
 		
+		b6 = self.buttonBar.addAction(labels['JSON'], lambda:self.parent.setView('JSON'))
+		b6.setToolTip('JSON')
+		
+
+		self.buttons = {'Level':b5, 'Scripts':b4, 'Animation':b2, 'JSON':b6}
 		
 		self.textAction = b1
 		self.animationAction = b2
@@ -488,7 +709,7 @@ class HeaderWidget(QtWidgets.QWidget):
 		
 		
 		font.setPointSize(12)
-		for b in (b1, b1bis, b2, b4, b5):
+		for b in (b1, b1bis, b2, b4, b5, b6):
 			b.setCheckable(True)
 			for w in b.associatedWidgets():
 				w.setObjectName( "MainToolButton" )
@@ -514,10 +735,61 @@ class HeaderWidget(QtWidgets.QWidget):
 			b.setData(key)
 			b.setCheckable(True)
 			actionGroup.addAction(b)
+			b = self.quickAccessBar.widgetForAction(b)
+			b.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+			b.customContextMenuRequested.connect(self.showFavoriteContextMenu)
 
 		layout.addWidget(self.quickAccessBar)
+		addFavButton = QtWidgets.QPushButton("+")
+		layout.addWidget(addFavButton)
+		addFavButton.clicked.connect(self.addFavorite)
 		self.settingType = False
 		
+	def showFavoriteContextMenu(self, point):
+		button = self.sender()
+		popMenu = QtWidgets.QMenu(self)
+		
+		renameAction = popMenu.addAction('Rename')
+		changeFileAction = popMenu.addAction('Change file')
+		
+		  
+
+		r = popMenu.exec_(button.mapToGlobal(point))
+		
+		# TODO
+		
+
+		
+	def addFavorite(self):
+		key = self.parent.addFavorite()
+		if (key == ''): return
+		b = self.quickAccessBar.addAction(key, lambda:self.parent.setView('favorite'))
+		b.setData(key)
+		b.setCheckable(True)
+		self.mainActionGroup.addAction(b)
+		
+		
+	def toggleButtons(self):
+		project = self.parent.currentProject
+		if(  ('is_OpenBOR' not in project) or project['is_OpenBOR']):
+			for key in ['Animation', 'Level', 'Scripts']:
+				b = self.buttons[key]
+				b.setVisible(True)
+			b = self.buttons['JSON']
+			b.setVisible(False)
+				
+		else:
+			for key in ['Animation', 'Level', 'Scripts']:
+				b = self.buttons[key]
+				b.setVisible(False)
+				
+# 				for w in b.associatedWidgets():
+# 					
+# 					if isinstance(w, QtWidgets.QToolButton):
+# 						print('olea', w)
+# 						w.setVisible(False)
+# 						# w.hide()
+			
 		
 		
 	def setInfo(self, fd):

@@ -9,6 +9,33 @@ from gui.util import FileInput, loadSprite, loadACTPalette
 from data import ParsedLine, FileWrapper
 
 
+def imageBoundingBox(p):
+    l = p.width()
+    t = p.height()
+    r = 0
+    b = 0
+
+    for y in range(p.height()):
+        rowFilled = False
+        for x in range(p.width()):
+            if qAlpha(p.pixel(x, y)):
+                rowFilled = True
+                r = max(r, x)
+                if l > x:
+                    l = x
+        if rowFilled:
+            t = min(t, y)
+            b = y
+    return QRect(QPoint(l, t), QPoint(r, b))
+
+
+def imageBoundingBox2(p):
+	item = QtWidgets.QGraphicsPixmapItem(p);
+	print('bounding', item.boundingRect().width(), item.boundingRect().height(), item.opaqueArea().boundingRect().width(), item.opaqueArea().boundingRect().height())
+	return p.copy(item.opaqueArea().boundingRect().toRect())
+
+
+
 class Entity(QtWidgets.QGraphicsItemGroup):
 	
 	PROJECTS_VARS = {}
@@ -49,6 +76,10 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 	
 	def __init__(self, entName='rugal', line=-1, parentWidget=None, loadAllAnims=False, defaultAnim='idle', shadow=True, offset=False):
 		QtWidgets.QGraphicsItemGroup.__init__(self)
+		
+		
+		self.xTranslate = 0 # for direction left levels
+		self.atTranslate = 0
 		
 		self.x = None
 		self.z = None
@@ -112,7 +143,7 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 				self.loadAnims(defaultAnim, loadAllAnims)
 		else:
 		
-			Entity.ROOT_PATH = os.path.dirname(settings.get_option('general/data_path', '/home/piccolo/workspace/OpenBOR/data')) + os.sep
+			# Entity.ROOT_PATH = os.path.dirname(settings.get_option('general/data_path', '/home/piccolo/workspace/OpenBOR/data')) + os.sep
 			
 			path = os.path.join(Entity.ROOT_PATH, 'data', 'models.txt')
 			if not os.path.isfile(path): return
@@ -328,9 +359,12 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 	
 		# print("loadAnims", defaultAnim, loadAllAnims)
 		# print(fullPath)
-		f = open(fullPath)
-		lines2 = f.read().split('\n')
-		f.close()
+		
+		f = FileWrapper(fullPath)
+		lines2 = f.getLines()
+		
+		# lines2 = f.read().split('\n')
+		# f.close()
 		inDefaultAnim = False
 		self.fPath = None
 		self.xOffset = 0
@@ -358,15 +392,19 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 				self.palettes.append(pLine2.next())
 				
 			if(part == 'facing'):
-				val = parseInt(pLine2.next().lower())
-				if val == 1:
-					self.forceFacing = 1
-					# self.facingRight = True
-					# self.setDirection(True)
-				elif val == 2:
-					self.forceFacing = 2
-					# self.facingRight = False
-					# self.setDirection(False)
+				val = pLine2.next()
+				if val != None:
+					val = parseInt(val.lower())
+					if val == 1:
+						self.forceFacing = 1
+						# self.facingRight = True
+						# self.setDirection(True)
+					elif val == 2:
+						self.forceFacing = 2
+						# self.facingRight = False
+						# self.setDirection(False)
+				else:
+					self.log('Entity ' + self.name + ' at line ' + str(self.line) + ' has problem with facing (no value set)')
 			
 			elif part == 'anim':
 				skipAnim = False
@@ -394,7 +432,10 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 				continue
 			elif part == 'offset': 
 				xOffset = int(pLine2.next().lower())
-				yOffset = int(pLine2.next().lower())
+				try:
+					yOffset = int(pLine2.next().lower())
+				except:
+					yOffset = 0
 				
 				currentFrame['xOffset'] = xOffset
 				currentFrame['yOffset'] = yOffset
@@ -467,7 +508,11 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 		# print(self.name, self.xOffset, self.yOffset)
 		self.xOffset = self.frames[self.currentFrame]['xOffset']
 		self.yOffset = self.frames[self.currentFrame]['yOffset']
-		self.setAt(self.at)
+		if not self.facingRight:
+			self.setDirection(self.facingRight);
+		# 	self.xOffset = self.xOffset * -1
+		else:
+			self.setAt(self.at)
 		self.updateShadowPos()
 		# self.frameItem = QtWidgets.QGraphicsPixmapItem(px)
 		# self.addToGroup(self.frameItem)
@@ -590,14 +635,18 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 		
 	def setAt(self, at):
 		# print('shadow width', self.shadowWidth)
+		# print('xTranslate', self.xTranslate)
 		self.at = at
 		if(at == None):
 			return
-		x = self.x
+		
 		y = self.z
+		x = self.x
 		if(x == None):
 			x = 0
 			y = 0
+			
+		x += self.xTranslate
 		
 		xOffset = self.xOffset
 		yOffset = self.yOffset
@@ -613,12 +662,18 @@ class Entity(QtWidgets.QGraphicsItemGroup):
 			self.offset.setPos(offsetX, offsetY-self.altitude)
 			
 		
+	def getRealAt(self):
+		if self.atTranslate != 0:
+			return (self.at - self.atTranslate) * -1
+		else: return self.at
+	
 	def getCoords(self):
+		xVal = int(self.pos().x()) - self.xTranslate
 		if(self.at != None):
 			
-			data = [int(self.pos().x()) - self.at + self.xOffset, int(self.pos().y() + self.yOffset)]
+			data = [xVal - self.at + self.xOffset, int(self.pos().y() + self.yOffset)]
 		else :
-			data = [int(self.pos().x()) - 0 + self.xOffset, int(self.pos().y() + self.yOffset)]
+			data = [xVal - 0 + self.xOffset, int(self.pos().y() + self.yOffset)]
 		# if(self.altitude != None):
 		data.append(self.altitude)
 		return data
@@ -717,7 +772,7 @@ class Bar(QtWidgets.QGraphicsItemGroup):
 	
 	def at(self, pos):
 		
-		self.pos = pos
+		self.atValue = pos
 		
 		pen = QtGui.QPen()
 		if(hasattr(self, 'overWriteColor')):
@@ -729,28 +784,40 @@ class Bar(QtWidgets.QGraphicsItemGroup):
 		pen.setWidth(4)
 		pen.setBrush(brush)
 		
+		
+		text = self.TEXT
+		if(text == 'G') : text = str(pos) + '\n' + text
+		elif(text == 'W'): text = text +  '\n' +  str(pos)
 
 		
-		self.textItem = QtWidgets.QGraphicsTextItem(self.TEXT)
-		self.textItem.setPos(pos-10, self.TEXT_POS)
-		self.line = QtWidgets.QGraphicsLineItem(pos, self.LINE_Y1 , pos, self.LINE_Y2)
+		self.textItem = QtWidgets.QGraphicsTextItem(text)
+		self.textItem.setPos(-10, self.TEXT_POS)
+		self.line = QtWidgets.QGraphicsLineItem(0, self.LINE_Y1 , 0, self.LINE_Y2)
 		
 		self.textItem.setDefaultTextColor(color)
 		self.line.setPen(pen)
 		
 		self.addToGroup(self.line)
 		self.addToGroup(self.textItem)
+		
+		self.setX(pos)
+		
+	def setAt(self, pos):
+		self.atValue = pos
+		self.setX(pos)
+		# self.setPos(pos, self.y())
 
 
 class Group(Bar):
 	
 	TEXT = 'G'
 	COLOR = (0,200,0)
-	TEXT_POS = 0
+	TEXT_POS = -15
 	LINE_Y1 = 30
 	LINE_Y2 = 200
 	
 	def __init__(self, min, max):
+		self.atValue = 0
 		Bar.__init__(self)
 		self.min = min
 		self.max = max
@@ -803,6 +870,7 @@ class DraggingItem(QtWidgets.QGraphicsItem):
 	def __init__(self, parent, coordKey, isXAxis=True):
 		QtWidgets.QGraphicsEllipseItem.__init__(self)
 		self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges)
+		self.setCursor(QtCore.Qt.PointingHandCursor)
 		self.parent = parent
 		self.coordKey = coordKey
 		self.isXAxis = isXAxis
@@ -1815,12 +1883,18 @@ class FontObject(QtWidgets.QGraphicsItemGroup):
 	def __init__(self, text, fontSprite=None):
 		QtWidgets.QGraphicsItemGroup.__init__(self)
 		
+		
+		self.fontSpacing = settings.get_option('misc/font_spacing', 0)
+		
 		self.fontSprite = fontSprite
 		self.loadFont()
 		
 		yOffset = 0
+		if(self.fontSpacing != -1):
+			yOffset += self.charHeight
 		
 		i = 0
+		currentXOffet = 0
 		for letter in text:
 			
 			letter_pos = self.letters.find(letter)
@@ -1832,7 +1906,11 @@ class FontObject(QtWidgets.QGraphicsItemGroup):
 				px = self.charsPX[letter_pos]
 		
 				item = QtWidgets.QGraphicsPixmapItem(px)
-				item.setPos(i*(self.charWidth), yOffset)
+				if(self.fontSpacing == -1):
+					item.setPos(i*(self.charWidth), yOffset) # same with for all letters
+				else:
+					item.setPos(currentXOffet, yOffset-px.height()) # adaptative width for letters
+					currentXOffet += px.width() + self.fontSpacing
 				
 				self.addToGroup(item)
 			i+=1
@@ -1862,6 +1940,7 @@ class FontObject(QtWidgets.QGraphicsItemGroup):
 		charWidth = int(fontImage.width() / 16)
 		self.charWidth = charWidth
 		charHeight = int(fontImage.height() / 16)
+		self.charHeight = charHeight
 		# charHeight = charWidth
 		print("charWidth", charWidth)
 		
@@ -1881,9 +1960,12 @@ class FontObject(QtWidgets.QGraphicsItemGroup):
 			
 		
 				charIMG = fontImage.copy(i*charWidth, y*charHeight, charWidth, charHeight)
+				# charIMG = charIMG.copy(imageBoundingBox(charIMG))
 			
 				px = QtGui.QPixmap.fromImage(charIMG)
 				
+				
+				px = imageBoundingBox2(px)
 				charsPX.append(px)
 				
 				#item = QtWidgets.QGraphicsPixmapItem(px)

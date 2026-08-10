@@ -127,6 +127,239 @@ class ImageQt(QtGui.QImage):
 			self.setColorTable(im_data["colortable"])
 
 
+class AccessOrderedToolbarItem():
+	
+	def __init__(self, path, name, bgColor=None, fgColor=None):
+		self.path = path
+		self.name = name
+		self.bgColor = bgColor
+		self.fgColor = fgColor
+
+
+class AccessOrderedToolbar(QtWidgets.QToolBar):
+	
+	changed = QtCore.pyqtSignal(object)
+	
+	def __init__(self, parent, params={}):
+		QtWidgets.QToolBar.__init__(self, parent)
+		self.parent = parent
+		self.params = params
+
+		self.automaticRecentFirst = False
+
+		actionGroup = QtWidgets.QActionGroup(self)
+		self.actionGroup = actionGroup
+
+		self.items_by_path = {}
+		self.recentFiles = {}
+		self.recentFilesQueue = []
+		self.recentFilesGroup = QtWidgets.QActionGroup(self)
+		self.dont_reorder = False
+
+		self.keyboard_index = 0
+
+		# Réserver de l'espace à droite pour un bouton d'extension plus large
+		self.setContentsMargins(0, 0, 30, 0)
+
+	def _fixExtensionButton(self):
+		for child in self.findChildren(QtWidgets.QToolButton):
+			if child.objectName() == 'qt_toolbar_ext_button':
+				child.setMinimumSize(40, self.height())
+				child.setIconSize(QtCore.QSize(24, 24))
+
+	def showEvent(self, event):
+		super().showEvent(event)
+		QtCore.QTimer.singleShot(0, self._fixExtensionButton)
+
+	
+	def addItem(self, item):
+		# if hasattr(self.parent.parent, 'core'):
+			# self.parent.parent.core.notify('Add item', 'warning')
+			# pass
+		if self.dont_reorder:
+			self.dont_reorder = False
+			return
+
+		if isinstance(item, dict):
+			if 'background_color' not in item:
+				if('useColor' in self.params and self.params['useColor'] == False):
+					item['background_color'] = None
+					item['font_color'] = None
+				else:
+					item['background_color'] = 'black'
+					item['font_color'] = 'white'
+			item = AccessOrderedToolbarItem(item['path'], item['name'], item['background_color'], item['font_color'])
+
+		
+		
+		if(item.path in self.recentFiles):
+			pathToRemove = item.path # not removed by itself
+			del self.recentFilesQueue[ self.recentFilesQueue.index(pathToRemove) ]
+			actionToRemove = self.recentFiles[ pathToRemove  ]
+			self.removeAction(actionToRemove)
+			del self.recentFiles[pathToRemove]
+		else: # not present, so potentially need to make space
+			if(len(self.recentFilesQueue) > 5):
+				pathToRemove = self.recentFilesQueue.pop() # remove by itself
+				actionToRemove = self.recentFiles[ pathToRemove  ]
+				self.removeAction(actionToRemove)
+				del self.recentFiles[pathToRemove]
+		
+		if(len(self.recentFiles) > 0):
+			firstAction = self.recentFiles[  self.recentFilesQueue[0] ]
+		else:
+			firstAction = None
+		
+		# action = self.addAction(item.name,  lambda:self.loadRecentFile(fd))
+		
+		
+		if(hasattr(item, 'baseName')): name = item.baseName
+		else : name = item.name
+		
+		
+		action = self.addAction(name,  self.loadItem)
+		
+		
+		
+		action.setData(item)
+		self.insertAction(firstAction, action)
+		action.setActionGroup(self.recentFilesGroup)
+		action.setCheckable(True)
+		action.setChecked(True)
+		
+		
+		# action.setStyleSheet("QToolButton { color: " + p['font_color']  + "; background: " + p['background_color']  + "; }");
+		# b = QtWidgets.QToolButton('OK')
+		
+		try:
+			if(item.bgColor != None):
+				b = self.widgetForAction(action)
+				
+				
+				b.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+				b.customContextMenuRequested.connect(self.showItemContextMenu)
+				b.setProperty('item', item)
+				
+				css = ''
+				
+				if('itemMaxWidth' in self.params):
+					css += "max-width:" + self.params['itemMaxWidth'] + ';'
+				else:
+					css += ' max-width:120px; '
+
+				b.setStyleSheet(css + "  color: "  +  item.fgColor +"; background: "  +  item.bgColor +";");
+		except:
+			pass
+		
+		# pal = QtGui.QPalette();
+		# # // set black background
+		# # // Qt::black / "#000000" / "black"
+		# pal.setColor(QtGui.QPalette.Window, QtCore.Qt.black);
+		# b.setAutoFillBackground(True); 
+		# b.setPalette(pal);
+		
+		# self.addWidget(b)
+		
+		self.items_by_path[item.path] = item
+		self.recentFiles[item.path] = action
+		self.recentFilesQueue.insert(0, item.path)
+		self.currentItem = item
+		
+	
+		
+		
+	def getCurrent(self):
+		return self.currentItem
+		
+		
+	def loadItem(self):
+		# reset keyboard index
+		self.keyboard_index = 0
+		d = self.sender().data()
+		# print(d)
+		
+		
+		
+		self.currentItem = d
+		
+		self.changed.emit(d)
+		
+		if(self.automaticRecentFirst):
+			self.addItem(d)
+		
+	def showItemContextMenu(self, point):
+		button = self.sender()
+		
+		item = button.property('item')
+		
+		return self.showItemContextMenuExternal(point, button, item)
+		
+		
+	def removeItem(self, item):
+		if isinstance(item, dict):
+			pathToRemove = item['path']
+		else:
+			pathToRemove = item.path # not removed by itself
+		
+		if(pathToRemove in self.recentFiles):
+			del self.recentFilesQueue[ self.recentFilesQueue.index(pathToRemove) ]
+			actionToRemove = self.recentFiles[ pathToRemove  ]
+			self.removeAction(actionToRemove)
+			del self.recentFiles[pathToRemove]
+		
+		
+		
+	def reset(self):
+		for key in self.items_by_path:
+			item = self.items_by_path[key]
+			self.removeItem(item)
+			
+		
+		
+	def toggleItem(self, item, emitChange=True):
+		if isinstance(item, dict):
+			item = AccessOrderedToolbarItem(item['path'], item['name'], item['background_color'], item['font_color'])
+		self.recentFiles[item.path].setChecked(True)
+		self.currentItem = item
+
+		if(emitChange):
+			self.changed.emit(item)
+		
+		
+	def togglePath(self, path, emitChange=True):
+		
+		item = self.items_by_path[path]
+		
+		self.toggleItem(item, emitChange)
+		
+		
+	def toggleNext(self):
+		if self.keyboard_index == 0 : return
+		self.keyboard_index -= 1
+		path = self.recentFilesQueue[self.keyboard_index]
+		item = self.items_by_path[path]
+		# item = {'path':path, 'name':'Unknown Toggle'}
+		# if isinstance(item, dict):
+		# 	if 'background_color' not in item:
+		# 		item['background_color'] = 'black'
+		# 		item['font_color'] = 'white'
+		self.dont_reorder = True
+		self.toggleItem(item)
+		
+	def togglePrevious(self):
+		if self.keyboard_index > len(self.recentFilesQueue)-2: return
+	
+		self.keyboard_index += 1
+		path = self.recentFilesQueue[self.keyboard_index]
+		item = self.items_by_path[path]
+		# item = {'path':path, 'name':'Unknown Toggle'}
+		# if isinstance(item, dict):
+		# 	if 'background_color' not in item:
+		# 		item['background_color'] = 'black'
+		# 		item['font_color'] = 'white'
+		self.dont_reorder = True
+		self.toggleItem(item)
+		
 
 class FileInput(QtWidgets.QWidget):
 	

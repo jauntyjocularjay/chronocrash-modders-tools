@@ -53,7 +53,10 @@ def getName(aniGroup):
 	
 	
 def getDelay(mugenDelay):
-	mugenDelay = int(mugenDelay)
+	try:
+		mugenDelay = int(mugenDelay)
+	except:
+		mugenDelay = 1
 	if mugenDelay in DELAYS:
 		return str(DELAYS[mugenDelay])
 	else:
@@ -124,7 +127,9 @@ class MugenWidget(QtWidgets.QWidget):
 		(modelName, extension) = os.path.splitext(filename)
 		
 		
-		toolsDir = '/run/media/piccolo/015AF545360D8260/DATA/openbor-utils'
+		# toolsDir = '/run/media/piccolo/015AF545360D8260/DATA/openbor-utils'
+		toolsDir = '.'
+		toolsDir = '/run/media/piccolo/SSD-DATA/1 - VERY IMPORTANT/CMT'
 		
 
 
@@ -136,7 +141,7 @@ class MugenWidget(QtWidgets.QWidget):
 			#cmd = 'other/sffextract.exe -d -i -o "' + tmp_path + '" "' + sff_path + '"'
 			subprocess.call('./other/sffextract.exe -d -i -o "' + tmp_path + '" "' + sff_path + '"', cwd='./other/')
 		else:
-			cmd = 'wine ' + toolsDir + '/other/sffextract.exe -d -i -o "' + tmp_path + '" "' + sff_path + '"'
+			cmd = 'wine "' + toolsDir + '/other/sffextract.exe" -d -i -o "' + tmp_path + '" "' + sff_path + '"'
 			subprocess.call(cmd, shell=True, cwd='./other/')
 		print('extraction done')
 		
@@ -187,7 +192,8 @@ class MugenWidget(QtWidgets.QWidget):
 					try:
 						params[i] = int(params[i])
 					except ValueError:
-						params[i] = 'FAIL'
+						params[i] = 0
+						# params[i] = 'FAIL'
 				params = params[0:min(len(params), 5)]
 				#print params
 				spriteGroup = params[0]
@@ -259,9 +265,14 @@ class MugenWidget(QtWidgets.QWidget):
 							#data.remove(line)
 							removeIndexes.append(j)
 						else:
-							modelLine[4] += delayAddition
-							delayAddition = 0
-							modelLine = line
+							try:
+								# print("THEISSUE", modelLine, modelLine[4], delayAddition)
+								modelLine[4] += delayAddition
+								delayAddition = 0
+								modelLine = line
+							except:
+								delayAddition = 0
+								modelLine = line
 							
 					modelLine[4] += delayAddition
 					for index in sorted(removeIndexes, reverse=True):

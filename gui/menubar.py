@@ -4,7 +4,7 @@ from PyQt5 import QtGui, QtCore, QtWidgets
 from common import settings, xdg
 from gui import modales, util
 
-from qutepart import EverydayPart
+from gui.main.everydaypart import EverydayPart
 
 import os
 
@@ -16,8 +16,10 @@ class MenuBar(QtWidgets.QMenuBar):
 		QtWidgets.QMenuBar.__init__(self, parent)
 		
 		
+		self.reset()
 		
-		
+	def reset(self):
+		self.clear()
 		#fileMenu = QtWidgets.QMenu(_('&File'))
 		fileMenu = self.addMenu(_('&File'))
 		fileMenu.addAction(_('&New'), self.core.newFile, QtGui.QKeySequence(self.tr("Ctrl+N", "File|New")))
@@ -48,7 +50,7 @@ class MenuBar(QtWidgets.QMenuBar):
 		themeMenu = self.addMenu(_('Theme'))
 		editorThemeMenu = themeMenu.addMenu(_('Editor'))
 		#tActions = []
-		theme = settings.get_option('gui/editor_theme', None)
+		theme = settings.get_option('gui/editor_theme', 'Normal')
 		actionGroup = QtWidgets.QActionGroup(self)
 		for f in os.listdir('themes/editor'):
 			name = os.path.splitext(f)[0]
@@ -60,7 +62,7 @@ class MenuBar(QtWidgets.QMenuBar):
 			
 		colorThemeMenu = themeMenu.addMenu(_('Widgets'))
 		#tActions = []
-		theme = settings.get_option('gui/widgets_theme', None)
+		theme = settings.get_option('gui/widgets_theme', 'Normal')
 		actionGroup = QtWidgets.QActionGroup(self)
 		for f in os.listdir('themes/widgets'):
 			name = os.path.splitext(f)[0]
@@ -76,6 +78,7 @@ class MenuBar(QtWidgets.QMenuBar):
 		
 		toolMenu.addAction(_('Tool dialog'), self.toolSelect)
 		toolMenu.addAction(_('Font preview'), self.openFontPreview)
+		toolMenu.addAction(_('Compare files'), self.openCompareFiles)
 		
 		
 		#projectMenu = self.addMenu(_('&Project'))
@@ -85,7 +88,8 @@ class MenuBar(QtWidgets.QMenuBar):
 		optionMenu = self.addMenu(_('&Options'))
 		self.optionMenu = optionMenu
 		
-		self.addOption('gui/double_click_to_load_element', False, 'Double click to load element in list', True)
+
+		
 		
 		
 		
@@ -99,6 +103,9 @@ class MenuBar(QtWidgets.QMenuBar):
 		a.setChecked(autoCollapse)
 		
 		
+		self.addOption('gui/toggle_focus_mode_hover', False, 'Toggle focus mode on hover lower-left corner', False)
+		
+		
 		def setSmallSceen():
 			autoCollapse = settings.get_option('gui/small_screen', False)
 			settings.set_option('gui/small_screen', not autoCollapse)
@@ -109,14 +116,27 @@ class MenuBar(QtWidgets.QMenuBar):
 		a.setChecked(smallScreen)
 		
 		
+		
+		
+		optionMenu.addSeparator()
+		
+		
 		def setLegacyCommand():
 			legacyCommands = settings.get_option('misc/legacy_commands', False)
 			settings.set_option('misc/legacy_commands', not legacyCommands)
 		
 		a = optionMenu.addAction(_('Legacy Mode (commands)'), setLegacyCommand)
+		self.legacyCommandsOption = a
 		a.setCheckable(True)
 		legacyCommands = settings.get_option('misc/legacy_commands', False)
 		a.setChecked(legacyCommands)
+		
+		
+		
+		# self.addOption('misc/null_collision_as_0', False, 'Null collision as "0" instead of "none"', False)
+		self.addOption('misc/null_reuse_og_line_format', True, 'Null collision reuse original format', False)
+		
+		
 		
 		
 		def setTabAction():
@@ -132,6 +152,60 @@ class MenuBar(QtWidgets.QMenuBar):
 		# also init here
 		EverydayPart.tabAlwaysIndent = tabAlwaysIndent
 		
+		
+		
+		def setAutoAddEmptyLines():
+			value = settings.get_option('entity/auto_add_empty_line_between_animations', True)
+			value = not value
+			
+			
+			settings.set_option('entity/auto_add_empty_line_between_animations', value)
+			
+	
+			
+		
+		a = optionMenu.addAction(_('Force empty lines between animations'), setAutoAddEmptyLines)
+		a.setCheckable(True)
+		value = settings.get_option('entity/auto_add_empty_line_between_animations', True)
+		a.setChecked(value)
+		
+		
+		
+		def enableCompletion():
+			completionEnabled = settings.get_option('editor/completion_enabled', True)
+			completionEnabled = not completionEnabled
+			
+			
+			settings.set_option('editor/completion_enabled', completionEnabled)
+			# self.informRestart()
+			
+			
+			self.informRestart()
+		
+		a = optionMenu.addAction(_('Enable completion'), enableCompletion)
+		a.setCheckable(True)
+		completionEnabled = settings.get_option('editor/completion_enabled', True)
+		a.setChecked(completionEnabled)
+		
+		
+		self.addOption('general/check_external_file_update', True, 'Check external file updates', False)
+		
+		optionMenu.addSeparator()
+		
+		self.addOption('misc/compact_boxes_blocks', True, 'Compact properties by block', False)
+		
+
+		
+		self.addOption('entity/recenter_on_anim_load', True, 'Re-center on animation load', False)
+		
+		self.addOption('entity/anim_show_comment_label', True, 'Show animation label (comment) in selector', True)
+		
+
+		
+		
+		optionMenu.addSeparator()
+		
+		
 		def setLevelAutoPlay():
 			autoPlay = settings.get_option('level/auto_play_on_load', True)
 			autoPlay = not autoPlay
@@ -142,6 +216,14 @@ class MenuBar(QtWidgets.QMenuBar):
 		a.setCheckable(True)
 		tabAlwaysIndent = settings.get_option('level/auto_play_on_load', True)
 		a.setChecked(tabAlwaysIndent)
+		
+		self.addOption('level/process_script', True, 'Process script (for changing spawn animation, ...)', False)
+		
+		self.addOption('level/entity_none_ignore_facing', False, 'Entities type NONE - facing hack', True)
+		
+		
+		
+		optionMenu.addSeparator()
 		
 		
 		def setForceTransparency():
@@ -161,20 +243,22 @@ class MenuBar(QtWidgets.QMenuBar):
 		util.FORCE_TRANSPARENCY = forceTransp
 		
 		
-		def setBindingModelsSortOrder():
-			sortOrder = settings.get_option('entity/binding_models_sort_alphabetical', False)
-			sortOrder = not sortOrder
+		def usePIL():
+			usePILOption = settings.get_option('general/usePIL_for_sprites', True)
+			usePILOption = not usePILOption
 			
 			
-			settings.set_option('entity/binding_models_sort_alphabetical', sortOrder)
+			settings.set_option('general/usePIL_for_sprites', usePILOption)
+			# self.informRestart()
 			
+			util.USE_PIL = usePILOption
 			self.informRestart()
 		
-		a = optionMenu.addAction(_('Binding GUI - sort models from A to Z'), setBindingModelsSortOrder)
+		a = optionMenu.addAction(_('Use PIL to interpret sprites'), usePIL)
 		a.setCheckable(True)
-		sortOrder = settings.get_option('entity/binding_models_sort_alphabetical', False)
-		a.setChecked(sortOrder)
-		# also init here ?
+		usePILOption = settings.get_option('general/usePIL_for_sprites', True)
+		a.setChecked(usePILOption)
+		util.USE_PIL = usePILOption
 		
 		
 		def setOpenGLRendering():
@@ -190,6 +274,15 @@ class MenuBar(QtWidgets.QMenuBar):
 		openGLRendering = settings.get_option('gui/opengl_rendering', False)
 		a.setChecked(openGLRendering)
 		
+		
+		
+		
+		
+		
+		
+		
+		
+		optionMenu.addSeparator()
 		
 		def disableAutoBackup():
 			disableAutoBackupProp = settings.get_option('general/disable_auto_backup', False)
@@ -220,39 +313,36 @@ class MenuBar(QtWidgets.QMenuBar):
 		a.setChecked(openGLRendering)
 		
 		
-		def usePIL():
-			usePILOption = settings.get_option('general/usePIL_for_sprites', True)
-			usePILOption = not usePILOption
-			
-			
-			settings.set_option('general/usePIL_for_sprites', usePILOption)
-			# self.informRestart()
-			
-			util.USE_PIL = usePILOption
-			self.informRestart()
-		
-		a = optionMenu.addAction(_('Use PIL to interpret sprites'), usePIL)
-		a.setCheckable(True)
-		usePILOption = settings.get_option('general/usePIL_for_sprites', True)
-		a.setChecked(usePILOption)
-		util.USE_PIL = usePILOption
+		self.addOption('general/safe_file_write', True, 'Safe file write', False)
+		self.addOption('general/change_encoding_write_error', True, 'Change file encoding on write error (require safe file write)', False)
 		
 		
-		def enableCompletion():
-			completionEnabled = settings.get_option('editor/completion_enabled', True)
-			completionEnabled = not completionEnabled
+		optionMenu.addSeparator()
+		
+		
+		
+		self.addOption('gui/double_click_to_load_element', False, 'Double click to load element in list', True)
+		
+		
+		def setBindingModelsSortOrder():
+			sortOrder = settings.get_option('entity/binding_models_sort_alphabetical', False)
+			sortOrder = not sortOrder
 			
 			
-			settings.set_option('editor/completion_enabled', completionEnabled)
-			# self.informRestart()
-			
+			settings.set_option('entity/binding_models_sort_alphabetical', sortOrder)
 			
 			self.informRestart()
 		
-		a = optionMenu.addAction(_('Enable completion'), enableCompletion)
+		a = optionMenu.addAction(_('Binding GUI - sort models from A to Z'), setBindingModelsSortOrder)
 		a.setCheckable(True)
-		completionEnabled = settings.get_option('editor/completion_enabled', True)
-		a.setChecked(completionEnabled)
+		sortOrder = settings.get_option('entity/binding_models_sort_alphabetical', False)
+		a.setChecked(sortOrder)
+		# also init here ?
+		
+		
+		
+		
+
 		
 		
 		def setSearchOnTextChange():
@@ -290,20 +380,7 @@ class MenuBar(QtWidgets.QMenuBar):
 		util.CHECK_MISSING_EXTENSION = checkForMissingExt
 		
 		
-		def setAutoAddEmptyLines():
-			value = settings.get_option('entity/auto_add_empty_line_between_animations', True)
-			value = not value
-			
-			
-			settings.set_option('entity/auto_add_empty_line_between_animations', value)
-			
-	
-			
 		
-		a = optionMenu.addAction(_('Force empty lines between animations'), setAutoAddEmptyLines)
-		a.setCheckable(True)
-		value = settings.get_option('entity/auto_add_empty_line_between_animations', True)
-		a.setChecked(value)
 		
 		
 		def setValue():
@@ -321,7 +398,15 @@ class MenuBar(QtWidgets.QMenuBar):
 		a.setChecked(value)
 		
 		
-		self.addOption('general/check_external_file_update', True, 'Check external file updates', False)
+		
+		
+		self.addOption('gui/file_selector_search_bottom', False, 'File selector - search bottom instead of top', True)
+		
+		
+		
+		
+		
+		
 	
 	
 		
@@ -358,10 +443,10 @@ class MenuBar(QtWidgets.QMenuBar):
 		
 		
 		
-	def addProjectQuickAccess(self, path):
-		if(path not in self.projects_quickly_loadable):
-			self.projects_quickly_loadable.append(path)
-			self.viewMenu.addAction(_('Quick switch to') + ' : ' + path, lambda: self.core.mainWidget.loadProject(path))
+	def addProjectQuickAccess(self, p):
+		if(p['name'] not in self.core.meWidget.loaded_projects):
+			self.core.meWidget.loaded_projects[ p['name']] = p
+			self.viewMenu.addAction(_('Quick switch to') + ' : ' + p['name'], lambda: self.core.meWidget.loadProject(p))
 		
 	def reloadSessionsList(self):
 		sessionMenu = self.sessionMenu
@@ -373,7 +458,14 @@ class MenuBar(QtWidgets.QMenuBar):
 		sessionMenu.addSeparator()
 		
 		actionGroup = QtWidgets.QActionGroup(self)
+		
 		currentSession = settings.get_option('general/last_session', 'Default')
+		
+		if(len(self.core.meWidget.loaded_projects) > 0 and self.core.meWidget.currentProject != None):
+			if('last_session' in self.core.meWidget.currentProject):
+				currentSession = self.core.meWidget.currentProject['last_session']
+		
+		
 		for f in os.listdir(os.path.join(xdg.get_data_home(), 'sessions')):
 			a = sessionMenu.addAction(f, self.core.setSession)
 			a.setData(f)
@@ -448,7 +540,7 @@ class MenuBar(QtWidgets.QMenuBar):
 
 			icons = pictures.addAction( _('Icons'), lambda: self.core.managers[module].setViewMode('icons'))
 			icons.setCheckable(True)
-			if(viewMode == 'icons'):
+			if(vcompact_biewMode == 'icons'):
 				icons.setChecked(True)
 			icons.setActionGroup(viewGroup)
 
@@ -572,6 +664,12 @@ class MenuBar(QtWidgets.QMenuBar):
 	def openFontPreview(self):
 		from gui.fontpreview import FontPreview
 		w = FontPreview()
+		w.show()
+		
+		
+	def openCompareFiles(self):
+		from gui.comparefiles import CompareFiles
+		w = CompareFiles()
 		w.show()
 	
 	def toolSelect(self):

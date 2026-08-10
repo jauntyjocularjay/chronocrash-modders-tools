@@ -4,10 +4,9 @@ Uses syntax module for doing the job
 
 import time
 
-from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSlot
+from PyQt5.QtCore import QObject, QTimer, pyqtSlot
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QColor, QFont, \
-                        QTextBlockUserData, QTextCharFormat, QTextLayout
+from PyQt5.QtGui import QTextBlockUserData, QTextLayout
 
 import qutepart.syntax
 
@@ -97,8 +96,6 @@ class SyntaxHighlighter(QObject):
     _MAX_PARSING_TIME_BIG_CHANGE_SEC = 0.4
     # when user is typing text - response shall be quick
     _MAX_PARSING_TIME_SMALL_CHANGE_SEC = 0.02
-    
-    FORCE_BOLD = False
 
     _globalTimer = GlobalTimer()
 
@@ -172,30 +169,6 @@ class SyntaxHighlighter(QObject):
         return self._syntax.isHereDoc(data, column)
 
     @staticmethod
-    def formatConverterFunction(format):
-        print('FORMAT', format.bold)
-        if format == qutepart.syntax.TextFormat():
-            return None  # Do not apply default format. Performance optimization
-
-        qtFormat = QTextCharFormat()
-
-        foregroundColor = QColor(format.color)
-        backgroundColor = QColor(format.background)
-
-        if foregroundColor != Qt.black:
-            qtFormat.setForeground(foregroundColor)
-
-        if backgroundColor != Qt.white:
-            qtFormat.setBackground(backgroundColor)
-
-        qtFormat.setFontItalic(format.italic)
-        qtFormat.setFontWeight(QFont.Bold if SyntaxHighlighter.FORCE_BOLD or format.bold else QFont.Normal)
-        qtFormat.setFontUnderline(format.underline)
-        qtFormat.setFontStrikeOut(format.strikeOut)
-
-        return qtFormat
-
-    @staticmethod
     def _lineData(block):
         dataObject = block.userData()
         if dataObject is not None:
@@ -209,7 +182,6 @@ class SyntaxHighlighter(QObject):
 
     @pyqtSlot(int, int, int)
     def _onContentsChange(self, from_, charsRemoved, charsAdded, zeroTimeout=False):
-        #print('ON CONTENT')
         global _gLastChangeTime
         firstBlock = self._document.findBlock(from_)
         untilBlock = self._document.findBlock(from_ + charsAdded)
@@ -300,7 +272,7 @@ class SyntaxHighlighter(QObject):
         self._pendingAtLeastUntilBlockNumber = None
 
         """Emit sizeChanged when highlighting finished, because document size might change.
-        See hlamer/enki issue #191
+        See andreikop/enki issue #191
         """
         documentLayout = self._textEdit.document().documentLayout()
         documentLayout.documentSizeChanged.emit(documentLayout.documentSize())
