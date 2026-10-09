@@ -136,6 +136,38 @@ class AccessOrderedToolbarItem():
 		self.fgColor = fgColor
 
 
+# Tool button drawing its icon and text centered together.
+# Stock TextBesideIcon (with style sheets) draws them left-aligned, leaving all the extra width on the right,
+# and centers the icon on the full font height instead of the capitals
+class IconTextToolButton(QtWidgets.QToolButton):
+
+	ICON_TEXT_GAP = 4
+
+	def paintEvent(self, e):
+		p = QtWidgets.QStylePainter(self)
+		opt = QtWidgets.QStyleOptionToolButton()
+		self.initStyleOption(opt)
+		icon, text = self.icon(), self.text()
+
+		# Frame and background only
+		opt.icon = QtGui.QIcon()
+		opt.text = ''
+		p.drawComplexControl(QtWidgets.QStyle.CC_ToolButton, opt)
+
+		fm = self.fontMetrics()
+		iconSize = self.iconSize()
+		textWidth = fm.horizontalAdvance(text)
+		x = int((self.width() - (iconSize.width() + self.ICON_TEXT_GAP + textWidth)) / 2)
+
+		textTop = (self.height() - fm.height()) / 2
+		capsCenter = textTop + fm.ascent() - fm.capHeight() / 2
+		mode = QtGui.QIcon.Normal if self.isEnabled() else QtGui.QIcon.Disabled
+		p.drawPixmap(x, round(capsCenter - iconSize.height() / 2), icon.pixmap(iconSize, mode))
+
+		textRect = QtCore.QRect(x + iconSize.width() + self.ICON_TEXT_GAP, 0, textWidth, self.height())
+		p.drawItemText(textRect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, opt.palette, self.isEnabled(), text, QtGui.QPalette.ButtonText)
+
+
 class AccessOrderedToolbar(QtWidgets.QToolBar):
 	
 	changed = QtCore.pyqtSignal(object)
@@ -158,6 +190,8 @@ class AccessOrderedToolbar(QtWidgets.QToolBar):
 
 		self.keyboard_index = 0
 
+		self.setIconSize(QtCore.QSize(14, 14))
+
 		# Réserver de l'espace à droite pour un bouton d'extension plus large
 		self.setContentsMargins(0, 0, 30, 0)
 
@@ -172,7 +206,7 @@ class AccessOrderedToolbar(QtWidgets.QToolBar):
 		QtCore.QTimer.singleShot(0, self._fixExtensionButton)
 
 	
-	def addItem(self, item):
+	def addItem(self, item, icon=None):
 		# if hasattr(self.parent.parent, 'core'):
 			# self.parent.parent.core.notify('Add item', 'warning')
 			# pass
@@ -196,13 +230,13 @@ class AccessOrderedToolbar(QtWidgets.QToolBar):
 			pathToRemove = item.path # not removed by itself
 			del self.recentFilesQueue[ self.recentFilesQueue.index(pathToRemove) ]
 			actionToRemove = self.recentFiles[ pathToRemove  ]
-			self.removeAction(actionToRemove)
+			self.removeItemAction(actionToRemove)
 			del self.recentFiles[pathToRemove]
 		else: # not present, so potentially need to make space
 			if(len(self.recentFilesQueue) > 5):
 				pathToRemove = self.recentFilesQueue.pop() # remove by itself
 				actionToRemove = self.recentFiles[ pathToRemove  ]
-				self.removeAction(actionToRemove)
+				self.removeItemAction(actionToRemove)
 				del self.recentFiles[pathToRemove]
 		
 		if(len(self.recentFiles) > 0):
@@ -217,10 +251,23 @@ class AccessOrderedToolbar(QtWidgets.QToolBar):
 		else : name = item.name
 		
 		
-		action = self.addAction(name,  self.loadItem)
-		
-		
-		
+		if icon is None:
+			action = self.addAction(name,  self.loadItem)
+		else:
+			# The action carries its own button, so the rest of the toolbar logic (group, checked state, order) is unchanged
+			action = QtWidgets.QWidgetAction(self)
+			action.setText(name)
+			action.setIcon(icon)
+			action.triggered.connect(self.loadItem)
+			button = IconTextToolButton(self)
+			button.setAutoRaise(True)
+			button.setFocusPolicy(QtCore.Qt.NoFocus)
+			button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+			button.setIconSize(self.iconSize())
+			button.setDefaultAction(action)
+			action.setDefaultWidget(button)
+
+
 		action.setData(item)
 		self.insertAction(firstAction, action)
 		action.setActionGroup(self.recentFilesGroup)
@@ -268,6 +315,11 @@ class AccessOrderedToolbar(QtWidgets.QToolBar):
 	
 		
 		
+	def removeItemAction(self, action):
+		self.removeAction(action)
+		if isinstance(action, QtWidgets.QWidgetAction): # owns its button, recreated on each addItem
+			action.deleteLater()
+	
 	def getCurrent(self):
 		return self.currentItem
 		
@@ -304,7 +356,7 @@ class AccessOrderedToolbar(QtWidgets.QToolBar):
 		if(pathToRemove in self.recentFiles):
 			del self.recentFilesQueue[ self.recentFilesQueue.index(pathToRemove) ]
 			actionToRemove = self.recentFiles[ pathToRemove  ]
-			self.removeAction(actionToRemove)
+			self.removeItemAction(actionToRemove)
 			del self.recentFiles[pathToRemove]
 		
 		

@@ -563,8 +563,8 @@ class EverydayEditor(AbstractEverydayEditor):
 
 		headerAction = self.buttonBar.addAction(_('Heading'), self.insertHeader)
 
-		if(self.parent.currentProject != None and (not( 'is_OpenBOR' in self.parent.currentProject) or self.parent.currentProject['is_OpenBOR'])):
-			genPaths = self.buttonBar.addAction( _('Generate paths'), self.generatePaths)
+		# Visibility follows the current project (OpenBOR only), see HeaderWidget.toggleButtons
+		self.genPathsAction = self.buttonBar.addAction( _('Generate paths'), self.generatePaths)
 		
 		viewRevisions = self.buttonBar.addAction( _('View revisions'), self.viewRevisions)
 		
@@ -747,7 +747,27 @@ class EverydayEditor(AbstractEverydayEditor):
 				return True
 			return False
 
-		if self.editor.fd.path.endswith('.py'):
+		if os.path.basename(self.editor.fd.path).lower() == 'levels.txt':
+			# levels.txt : index the "set" declarations, so big projects can jump from set to set
+			setCount = 0
+			for lineNum, line in enumerate(lines):
+				if isHeaderTitleLine(line):
+					title = extractHeaderTitle(line)
+					if title:
+						keys.append({'name': title, 'isHeader': True, 'startLine': lineNum})
+						continue
+
+				pLine = ParsedLine(line)
+				part = pLine.next()
+				if part is None : continue
+				if part.lower() != 'set' : continue
+
+				setCount += 1
+				name = pLine.next()
+				if name is None : name = _('set') + ' ' + str(setCount)
+				keys.append({'name': name, 'isHeader': False, 'startLine': lineNum})
+
+		elif self.editor.fd.path.endswith('.py'):
 
 			for lineNum, line in enumerate(lines):
 				# Check for header title
@@ -839,8 +859,13 @@ class EverydayEditor(AbstractEverydayEditor):
 		self.contentIndexerPanel.clear()
 		self.contentIndexerPanel.load(keys)
 	
-	def loadKey(self, key):
+	def loadKey(self, key, startLine=None):
 		self.editor.setCenterOnScroll(True)
+		if startLine is not None:
+			# exact position is known : no need to search the text (and no ambiguity if the name appears twice)
+			self.goToRequest +=1 # cancel any pending goTo
+			self.editor.cursorPosition = (startLine, 0)
+			return
 		self.goTo(key.lower())
 
 	def highlightCurrentSection(self, lineNumber):
@@ -937,7 +962,27 @@ class EverydayEditor(AbstractEverydayEditor):
 			self.parent.openFile(compare2_path)
 	
 	
+	RECENT_BAR_ICONS = {}
+
+	# Notes and pinned files get an icon in the recent bar to tell them apart from regular files
+	def getRecentBarIcon(self, fd):
+		if hasattr(fd, 'noteId'):
+			key = 'note'
+		elif any(fd is fav for fav in getattr(self.parent, "favorites", {}).values()):
+			key = 'pin'
+		else:
+			return None
+
+		if key not in EverydayEditor.RECENT_BAR_ICONS:
+			image = QtGui.QImage('icons/' + key + '.svg')
+			if(settings.get_option('gui/widgets_theme', None) == "Dark"): image.invertPixels()
+			EverydayEditor.RECENT_BAR_ICONS[key] = QtGui.QIcon(QtGui.QPixmap.fromImage(image))
+		return EverydayEditor.RECENT_BAR_ICONS[key]
+
 	def addRecentFile(self, fd):
+		if not settings.get_option('gui/pinned_files_in_recent_bar', True) and any(fd is fav for fav in getattr(self.parent, "favorites", {}).values()):
+			return
+
 		# We need to make sure fd is colored if multiple projects are opened
 		if(fd.projectName != 'Unknown' and (len( self.parent.loaded_projects) > 1 or settings.get_option('gui/enable_color_with_one_project', False)) ):
 			if fd.projectName in self.parent.loaded_projects:
@@ -953,8 +998,8 @@ class EverydayEditor(AbstractEverydayEditor):
 			# 			fd.fgColor = item['font_color'];
 					
 				
-		self.recentBar.addItem(fd)
-		
+		self.recentBar.addItem(fd, self.getRecentBarIcon(fd))
+
 # 		if(fd.path in self.recentFiles):
 # 			pathToRemove = fd.path # not removed by itself
 # 			del self.recentFilesQueue[ self.recentFilesQueue.index(pathToRemove) ]
@@ -996,6 +1041,10 @@ class EverydayEditor(AbstractEverydayEditor):
 		# NOTE revision.path = "standard", "alternate", ...
 		
 		fd = self.editor.fd
+		
+		if fd.path is None or fd.projectName not in self.parent.loaded_projects:
+			self.parent.core.notify(_('Save the file first to use versions'), 'warning')
+			return
 		
 		versionKey = version.path
 		
@@ -1087,6 +1136,7 @@ class EverydayEditor(AbstractEverydayEditor):
 	def loadPotentialVersionList(self):
 		fd = self.editor.fd
 		
+		if fd.path is None: return # New file, never saved : no path to look versions for
 		if fd.projectName == 'Unknown' or fd.projectName not in self.parent.loaded_projects: return
 
 		project = self.parent.loaded_projects[fd.projectName]
@@ -1128,7 +1178,15 @@ class EverydayEditor(AbstractEverydayEditor):
 		
 		
 	def loadRecentFile(self, fd):
-		
+
+		# Show the file selector list matching the item : notes <-> opened files
+		if hasattr(self, 'fileSelector'):
+			if hasattr(fd, 'noteId'):
+				if self.fileSelector.mode == 'opened':
+					self.fileSelector.setMode('notes')
+			elif self.fileSelector.mode == 'notes':
+				self.fileSelector.setMode('opened')
+
 		self.parent.loadFile(fd)
 		
 	#@util.threaded
@@ -1372,7 +1430,7 @@ class EverydayEditor(AbstractEverydayEditor):
 				
 				self.editor = self.stack1.currentWidget()
 				self.parent.headerWidget.setInfo(self.editor.fd)
-				self.recentBar.addItem(self.editor.fd)
+				self.addRecentFile(self.editor.fd)
 
 		
 		if fd in self.stack2.fd_list:
@@ -1572,7 +1630,7 @@ class EverydayEditor(AbstractEverydayEditor):
 				frameCount = 0
 				for line in lines:
 					pLine = ParsedLine(line)
-					part = pLine.next()
+					part = pLine.nextKeyword()
 					if part == 'frame':
 						frameCount += 1
 						
@@ -1581,7 +1639,7 @@ class EverydayEditor(AbstractEverydayEditor):
 				return
 			elif text != '':
 				pLine = ParsedLine(text)
-				part = pLine.next()
+				part = pLine.nextKeyword()
 				if part in ('frame', 'bglayer', 'fglayer', 'background', 'panel', 'frontpanel'):
 					p = pLine.next()
 					if(p is None): return
@@ -1623,7 +1681,7 @@ class EverydayEditor(AbstractEverydayEditor):
 						while lineNumber >= 0 and part != 'anim':
 							line = self.editor.lines[lineNumber]
 							pLine = ParsedLine(line)
-							part = pLine.next()
+							part = pLine.nextKeyword()
 							if part == 'frame' :
 								frameCount += 1
 							lineNumber -=1

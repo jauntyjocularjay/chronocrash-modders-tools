@@ -24,7 +24,8 @@ from gui.entity.frameproperties import FramePropertiesEditor, BindingEditor, Oni
 from gui.level.items import Wall, Entity
 
 
-IGNORE_LIST = settings.get_option('entity/ignore_commands', [])
+# lowercased, because commands are matched against lowercased keywords (see ParsedLine.nextKeyword)
+IGNORE_LIST = [c.lower() for c in settings.get_option('entity/ignore_commands', [])]
 
 defaultCompact = True
 
@@ -650,12 +651,14 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		self.editor.highlightColor = QtGui.QColor('#2CA2AE')
 		
 		
-	def addAnim(self, ID):
+	def addAnim(self, ID, label=''):
 		self.validateChanges()
 		if ID in self.dicData:
 			return
-		lines = ['anim ' + ID, '\tframe data/chars/misc/empty.gif']
-		data = {'ID':ID, 'label':'', 'lines':lines}
+		animLine = 'anim ' + ID
+		if label != '' : animLine += ' # ' + label # the label is stored as the comment of the anim line
+		lines = [animLine, '\tframe data/chars/misc/empty.gif']
+		data = {'ID':ID, 'label':label, 'lines':lines}
 		self.dicData[ID] = data
 		self.fullData.append(data)
 		
@@ -1018,8 +1021,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		currentFrameNumber = -1
 		for lineNumber, line in enumerate(lines):
 			pLine = ParsedLine(line)
-			part = pLine.next()
-			
+			part = pLine.nextKeyword()
+
 			if(part == '@script'):
 				if('@end_script' not in line):
 					inLineScript = True
@@ -1047,8 +1050,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				break
 				
 			pLine = ParsedLine(line)
-			part = pLine.next()
-				
+			part = pLine.nextKeyword()
+
 			if(part == '@script'):
 				if('@end_script' not in line):
 					inLineScript = True
@@ -1204,8 +1207,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 			
 			pLine = ParsedLine(line)
 				
-			part = pLine.next()
-			
+			part = pLine.nextKeyword()
+
 			if(part is None):
 				checkForBindingMask()
 				continue
@@ -1230,8 +1233,21 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				#found = False
 				#i = 0
 				
+				if self.currentAnim is None:
+					# No animation loaded (blank animation editor, e.g. a brand new entity file).
+					# The user is typing an "anim" line : register it as a new animation
+					# instead of looking up dicData[None].
+					if animName in self.dicData: continue
+					data = {'ID':animName, 'label':pLine.getCom(), 'lines':list(self.editor.lines)}
+					self.dicData[animName] = data
+					self.fullData.append(data)
+					self.currentAnim = animName
+					self.animSelector.clear()
+					self.animSelector.load(self.fullData)
+					continue
+
 				data = self.dicData[self.currentAnim]
-				
+
 				print(data)
 				
 				
@@ -1653,8 +1669,8 @@ class EntityEditorWidget(QtWidgets.QWidget):
 		for line in lines:
 			
 			pLine = ParsedLine(line)
-			part = pLine.next()
-			
+			part = pLine.nextKeyword()
+
 			if inBBox and (part is not None and part.startswith('bbox')):
 				continue
 			else:
@@ -1837,9 +1853,12 @@ class EntityEditorWidget(QtWidgets.QWidget):
 				
 			elif(self.currentAnim != 'header' and part != 'attackone' and part != 'attackthrottle' and (part.startswith('attack') or part.startswith('shock') or part.startswith('blast') or part.startswith('freeze') or part.startswith('burn') or part.startswith('steal'))): #  and len(pLine) > 6
 				if(currentFrame >= len(self.anim.frames)):
-					QtWidgets.QMessageBox.warning(self, _('Error'), _('An attackbox was declared after the last frame'))
-					return newLines
-				
+					# same handling as the other blocks : keep the line as-is instead of
+					# truncating the rebuilt text (which would lose everything after it)
+					logging.warning('An attackbox was declared after the last frame, line kept as-is : ' + line)
+					newLines.append(line)
+					continue
+
 				inAbox = True
 				# Le soucis c'est que là, collisionIndex peut être à 1 alors qu'on arrive sur du implicit 0
 				filled['attack_' + str(collisionIndex)] = True

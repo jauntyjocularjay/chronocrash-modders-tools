@@ -257,11 +257,36 @@ class KeySelector(QtWidgets.QWidget):
 		
 		
 	def createAnim(self):
-		text = QtWidgets.QInputDialog.getText(self, _("Create animation"), _("Name"))[0]
+		dialog = QtWidgets.QDialog(self)
+		dialog.setWindowTitle(_("Create animation"))
+
+		nameEntry = QtWidgets.QLineEdit()
+		labelEntry = QtWidgets.QLineEdit()
+		labelEntry.setPlaceholderText(_('Optional'))
+
+		form = QtWidgets.QFormLayout()
+		form.addRow(_("Name"), nameEntry)
+		form.addRow(_("Label"), labelEntry)
+
+		buttonBox = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+		buttonBox.accepted.connect(dialog.accept)
+		buttonBox.rejected.connect(dialog.reject)
+
+		layout = QtWidgets.QVBoxLayout()
+		layout.addLayout(form)
+		layout.addWidget(buttonBox)
+		dialog.setLayout(layout)
+
+		nameEntry.setFocus()
+
+		if dialog.exec_() != QtWidgets.QDialog.Accepted : return
+
+		text = nameEntry.text().strip()
+		label = labelEntry.text().strip()
 
 		if text != '': # TODO make sure animation name is valid (startswith freespecial, etc OR in idle, walk, rise, etc
-			self.mainEditor.addAnim(text)
-			self.append((text, '' , 999, text))
+			self.mainEditor.addAnim(text, label)
+			self.append((text, label , 999, text))
 			
 	def deleteAnim(self):
 		if(self.currentAnimID == "idle"):
@@ -321,7 +346,7 @@ class KeySelector(QtWidgets.QWidget):
 			for i, d in enumerate(data):
 				ID = d.get('ID', d.get('name', ''))
 				ID_edited = d.get('ID_edited', ID)
-				label = d.get('label', '')
+				label = d.get('label', '').strip() # the label comes from the raw comment ("anim foo # bar"), trim it for display
 				isHeader = d.get('isHeader', False)
 				startLine = d.get('startLine', None)
 				endLine = d.get('endLine', None)
@@ -333,7 +358,7 @@ class KeySelector(QtWidgets.QWidget):
 			if isinstance(d, dict):
 				# Support both 'name' (from loadContentIndexerPanel) and 'ID' (from loadFrom)
 				name = d.get('name', d.get('ID', ''))
-				label = d.get('label', '')
+				label = d.get('label', '').strip()
 				isHeader = d.get('isHeader', False)
 				startLine = d.get('startLine', None)
 				endLine = d.get('endLine', None)
@@ -343,7 +368,11 @@ class KeySelector(QtWidgets.QWidget):
 		
 		
 	def refresh(self):
-		
+
+		if(not 'animation' in self.options and hasattr(self.mainEditor, 'loadContentIndexerPanel')):
+			# content indexer mode (sets of levels.txt, functions of a script...) : anim parsing would just empty the panel
+			return self.mainEditor.loadContentIndexerPanel(self.mainEditor.editor.lines)
+
 		self.loadFrom()
 			
 	def loadFrom(self, lines=None):
@@ -464,7 +493,7 @@ class KeySelector(QtWidgets.QWidget):
 		if(label != ''): self.currentAnimName += '(' + label + ')'
 		
 		if('animation' in self.options): return self.mainEditor.loadAnim(index.data(AnimModel.itemRole).ID)
-		self.mainEditor.loadKey(index.data(AnimModel.itemRole).ID)
+		self.mainEditor.loadKey(index.data(AnimModel.itemRole).ID, index.data(AnimModel.itemRole).startLine)
 		
 		
 	def search(self):

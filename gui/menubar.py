@@ -401,7 +401,9 @@ class MenuBar(QtWidgets.QMenuBar):
 		
 		
 		self.addOption('gui/file_selector_search_bottom', False, 'File selector - search bottom instead of top', True)
-		
+
+		self.addOption('gui/pinned_files_in_recent_bar', True, 'Show pinned files in recent bar', False)
+
 		
 		
 		

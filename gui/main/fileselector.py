@@ -540,7 +540,9 @@ class FileSelector(QtWidgets.QWidget):
 		b1 = self.buttonBar.addAction(libraryIcon, 'Library', lambda:self.setMode('library'))
 		b1bis = self.buttonBar.addAction(filesIcon, 'Opened', lambda:self.setMode('opened'))
 
-		notesIcon = QtGui.QIcon.fromTheme('text-x-generic')
+		notesIcon = QtGui.QImage('icons/note.svg')
+		if(theme == "Dark"): notesIcon.invertPixels()
+		notesIcon = QtGui.QIcon(QtGui.QPixmap.fromImage(notesIcon))
 		b1notes = self.buttonBar.addAction(notesIcon, 'Notes', lambda:self.setMode('notes'))
 
 		b1.setCheckable(True)
@@ -1427,7 +1429,7 @@ class FileSelector(QtWidgets.QWidget):
 								
 								for i, line2 in enumerate(lines2):
 									pLine2 = ParsedLine(line2)
-									part = pLine2.next()
+									part = pLine2.nextKeyword()
 									if part == 'type':
 										type = pLine2.next().lower()
 									if part == 'icon':
@@ -1445,7 +1447,9 @@ class FileSelector(QtWidgets.QWidget):
 			categories = ['player', 'enemy', 'npc', 'obstacle', 'panel', 'none', 'text', 'endlevel', 'trap', 'item', 'steamer', 'unknown']
 			categorieNodes = {}
 			for i, c in enumerate(categories):
-				categorieNodes[c] = self.append([c, c, i, None, 'icons/' + c +'.png', None])
+				node = self.append([c, c, i, None, 'icons/' + c +'.png', None])
+				node.showCount = True # display the number of entities of this type
+				categorieNodes[c] = node
 				
 				
 			for i, d in enumerate(data):
@@ -1480,7 +1484,8 @@ class FileSelector(QtWidgets.QWidget):
 			lines = f.getLines()
 			
 			levelsAlreadyAdded = []
-			z = {}
+			# levels declared before any "z" line still need usable bounds
+			z = {'xMin':160, 'xMax':232, 'BGHeight':160}
 			HUD_settings = {'lbarsize':{'width':100, 'height':5}}
 			
 			for i, line in enumerate(lines):
@@ -1558,6 +1563,7 @@ class FileSelector(QtWidgets.QWidget):
 						scanDir(path, node)
 					else:
 						if name.endswith('~'): continue
+						if name.endswith('.1'): continue
 						node = self.append((name, name, 0, path, None, File(path, currentProjectName)), parentNode)
 						
 			path = os.path.join(FileSelector.ROOT_PATH, 'data', 'scripts')
@@ -1970,6 +1976,8 @@ class FileSelector(QtWidgets.QWidget):
 		if not settings.get_option('misc/search_on_text_change', True):
 			self.search()
 		elif self._projectSearchTimer is None:
+			# a pending debounced search() would otherwise fire afterwards and cancel the project search
+			self.searchKeyDebounce.stop()
 			self.searchInProject()
 
 	def _onCtrlEnterSearch(self):
@@ -1978,6 +1986,9 @@ class FileSelector(QtWidgets.QWidget):
 	def search(self):
 		txt = self.searchEntry.text()
 
+		# Leave project search before filtering : otherwise the (possibly huge) project results
+		# tree gets filtered and expanded for nothing, just before being discarded
+		self._exitProjectSearchMode()
 
 		if(txt != self.currentFilter or txt == ''):
 			self.treeView.model().expandResults = 0
@@ -2007,9 +2018,6 @@ class FileSelector(QtWidgets.QWidget):
 		self._updateSearchInProjectHint(txt)
 
 	def _updateSearchInProjectHint(self, txt):
-		# Cancel any ongoing project search when the filter changes
-		self._exitProjectSearchMode()
-
 		if txt == '' or self.mode != 'opened':
 			self.searchInProjectHint.hide()
 			return
@@ -2044,10 +2052,11 @@ class FileSelector(QtWidgets.QWidget):
 			self._projectSearchTimer = None
 		if self._projectSearchMode:
 			self._projectSearchMode = False
-			self.projectSearchModel.reset()
 			if hasattr(self, '_savedProjectFilter'):
 				self.filterModel.setProjectFilter(self._savedProjectFilter)
+			# detach before reset, so the proxy/view don't process the reset of a big model
 			self.filterModel.setSourceModel(self.openedModel)
+			self.projectSearchModel.reset()
 
 	def searchInProject(self):
 		txt = self.searchEntry.text()
@@ -2339,15 +2348,16 @@ class FileSelector(QtWidgets.QWidget):
 		
 		def actionTriggered(action):
 			print("menu_action triggered", action)
+			if action is None: return
 			if action == delete:
 				self.deleteItem(index)
 			elif action == copyLocation:
 				clipboard = QtWidgets.QApplication.clipboard()
-				clipboard.setText(item.fd.path)
+				clipboard.setText(itemPath)
 			elif action == openInFileBrowser:
 				import subprocess
 				import sys
-				filePath = item.fd.path
+				filePath = itemPath
 				if sys.platform == 'linux':
 					# Detect default file manager and use appropriate command
 					default_fm = ''
@@ -2431,14 +2441,22 @@ class FileSelector(QtWidgets.QWidget):
 		index = self.sender().indexAt(pos)
 		if not index.isValid() : return
 		item = index.data(FileModel.itemRole) #internalPointer()
-		
+
+		# folder and category nodes have no file descriptor, only a path (None for categories)
+		isFolder = item.fd is None
+		itemPath = item.path if isFolder else item.fd.path
+		if isFolder and itemPath is None: return
+
 		popMenu = QtWidgets.QMenu(self)
-		delete = popMenu.addAction(QtGui.QIcon.fromTheme('list-remove'), _("Close"))
+		delete = compare1 = compare2 = None
+		if not isFolder:
+			delete = popMenu.addAction(QtGui.QIcon.fromTheme('list-remove'), _("Close"))
 		copyLocation = popMenu.addAction(QtGui.QIcon.fromTheme('edit-copy'), _("Copy location"))
 		openInFileBrowser = popMenu.addAction(QtGui.QIcon.fromTheme('folder-open'), _("Open in file browser"))
-		compare1 = popMenu.addAction(_("Compare 1"))
-		compare2 = popMenu.addAction(_("Compare 2"))
-		
+		if not isFolder:
+			compare1 = popMenu.addAction(_("Compare 1"))
+			compare2 = popMenu.addAction(_("Compare 2"))
+
 		compare_to_equivalents = {}
 		open_equivalent = {}
 		
@@ -2449,7 +2467,7 @@ class FileSelector(QtWidgets.QWidget):
 		
 		
 		
-		for projectName in self.mainEditor.loaded_projects:
+		for projectName in (self.mainEditor.loaded_projects if not isFolder else []):
 			if(projectName != item.fd.projectName):
 				
 				if simpleActions:
@@ -2545,6 +2563,7 @@ class Item(TreeItem):
 			self.fd.node = self
 
 		self.subelements = []
+		self.showCount = False # if True, display the number of children next to the label
 		self.iconPath =  data[4]
 		self.icon = None
 		
@@ -2581,6 +2600,7 @@ class FileModel(TreeModel):
 	expandedRoleWithoutFilter = Qt.UserRole+3
 	containsRole = Qt.UserRole+4
 	expandWithoutContainsRole = Qt.UserRole+5
+	filterTextRole = Qt.UserRole+7
 	
 	def __init__(self):
 		TreeModel.__init__(self)
@@ -2621,10 +2641,16 @@ class FileModel(TreeModel):
 			return item.containsFilter
 		elif role == self.expandWithoutContainsRole:
 			return item.expandWithoutContains
+		elif role == self.filterTextRole:
+			# raw label : the displayed one may contain the number of children
+			if index.column() == 0:
+				return item.label
 		elif role == Qt.DisplayRole:
 			if index.column() == -1:
 				return item.pos
 			elif index.column() == 0:
+				if item.showCount:
+					return item.label + ' (' + str(item.childCount()) + ')'
 				return item.label
 				
 		elif role == Qt.DecorationRole and index.column() == 0:

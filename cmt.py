@@ -1,5 +1,14 @@
 # -*- coding: utf-8 -*-
 import os, sys, traceback, shutil
+
+# Once frozen, the bundled directories (icons, themes, data, ...) sit in
+# sys._MEIPASS, but a lot of the code reaches them through paths relative to
+# the working directory. Move there so both conventions agree, after turning
+# the command line paths absolute while the original directory still applies.
+if getattr(sys, 'frozen', False):
+	sys.argv[1:] = [os.path.abspath(a) if os.path.exists(a) else a for a in sys.argv[1:]]
+	os.chdir(sys._MEIPASS)
+
 import locale
 import time
 from datetime import datetime

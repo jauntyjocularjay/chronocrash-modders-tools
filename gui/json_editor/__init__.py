@@ -36,7 +36,7 @@ class JSONGUIEditor(QtWidgets.QWidget):
 		
 		print(self.JSON_data)
 		
-	def loadKey(self, key):
+	def loadKey(self, key, startLine=None):
 		print(self.JSON_data[key])
 		
 		self.key = key

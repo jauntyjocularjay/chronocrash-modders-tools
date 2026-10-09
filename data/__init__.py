@@ -54,7 +54,13 @@ class ParsedLine:
 			return None
 		
 		return self.current()
-	
+
+	def nextKeyword(self):
+		# Same as next(), lowercased : OpenBOR keywords are case insensitive
+		part = self.next()
+		if part is None : return None
+		return part.lower()
+
 
 	def set(self, val):
 		self.parts[self.pos] = val

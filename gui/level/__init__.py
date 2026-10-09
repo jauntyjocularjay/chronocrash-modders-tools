@@ -16,6 +16,22 @@ PLAYER_MAX_Z = 232
 FRONTPANEL_Z  =  PLAYER_MAX_Z+50
 PANEL_Z      =   PLAYER_MIN_Z-50
 
+
+'''
+	Read the z bounds of a level, falling back to the engine defaults when the
+	"z" line of levels.txt is missing or malformed (logged, not fatal).
+'''
+def getZBounds(z, logWarning=None):
+	bounds = []
+	for key, default in (('xMin', PLAYER_MIN_Z), ('xMax', PLAYER_MAX_Z)):
+		try:
+			bounds.append(float(z[key]))
+		except (KeyError, TypeError, ValueError):
+			bounds.append(float(default))
+			if logWarning != None:
+				logWarning('Problem with level z bounds : "' + key + '" missing or not a number in levels.txt, default (' + str(default) + ') used.')
+	return bounds
+
 class LevelEditorWidget(QtWidgets.QWidget):
 	
 	refresh = QtCore.pyqtSignal()
@@ -1480,7 +1496,7 @@ class WallControlWidget(QtWidgets.QScrollArea):
 			elif part.lower() in ('spawn1', 'spawn2', 'spawn3', 'spawn4'):
 				offset = 0
 				if(hasattr(self.levelEditor, 'z')):
-					offset = int(self.levelEditor.z['xMin'])
+					offset = int(getZBounds(self.levelEditor.z)[0]) # warned once later, when the z lines are drawn
 				x = parseInt(pLine.next())
 				
 				z = parseInt(pLine.next())
@@ -1756,13 +1772,15 @@ class WallControlWidget(QtWidgets.QScrollArea):
 		
 		if(hasattr(self.levelEditor, 'z')):
 			print("self.z", self.levelEditor.z)
-		
-			self.xMin = QtWidgets.QGraphicsLineItem(0.0, float(self.levelEditor.z['xMin']) , float(self.levelEditor.fullWidth), float(self.levelEditor.z['xMin']))
+
+			xMin, xMax = getZBounds(self.levelEditor.z, self.levelEditor.logWarning)
+
+			self.xMin = QtWidgets.QGraphicsLineItem(0.0, xMin , float(self.levelEditor.fullWidth), xMin)
 			self.xMin.setZValue(9999)
 			self.xMin.setPen(QtGui.QPen(QtGui.QColor(240,140,120)))
 			self.levelEditor.scene.addItem(self.xMin)
-			
-			self.xMax = QtWidgets.QGraphicsLineItem(0.0, float(self.levelEditor.z['xMax']) , float(self.levelEditor.fullWidth), float(self.levelEditor.z['xMax']))
+
+			self.xMax = QtWidgets.QGraphicsLineItem(0.0, xMax , float(self.levelEditor.fullWidth), xMax)
 			self.xMax.setZValue(9999)
 			self.xMax.setPen(QtGui.QPen(QtGui.QColor(150,100,255)))
 			self.levelEditor.scene.addItem(self.xMax)

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
 
-VERSION = '0.7.11.2 (07/07/26)'
+VERSION = '0.7.12 (22/09/26)'
 
 
 

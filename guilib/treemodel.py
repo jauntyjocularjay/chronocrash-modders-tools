@@ -7,6 +7,7 @@ expandedRoleWithoutFilter = Qt.UserRole+3
 containsRole = Qt.UserRole+4
 expandWithoutContainsRole = Qt.UserRole+5 # for nodes that contains a parent that contains filter, and that are expanded despite themselves not containing filter
 projectRole = Qt.UserRole+6
+filterTextRole = Qt.UserRole+7 # raw text used for filtering (may differ from what is displayed)
 
 class FilterModel(QtCore.QSortFilterProxyModel):
 	
@@ -19,7 +20,9 @@ class FilterModel(QtCore.QSortFilterProxyModel):
 		col0 = self.sourceModel().index(sourceRow, 0, sourceParent)
 		
 		
-		data = self.sourceModel().data(col0, Qt.DisplayRole)
+		data = self.sourceModel().data(col0, filterTextRole)
+		if data is None:
+			data = self.sourceModel().data(col0, Qt.DisplayRole)
 		
 		# item = self.sourceModel().data(col0, itemRole)
 		# print(data)

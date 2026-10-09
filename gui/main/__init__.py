@@ -88,10 +88,8 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.levelEditor = LevelEditorWidget()
 		rightLayout.addWidget(self.entityEditor, 1)
 		rightLayout.addWidget(self.levelEditor, 1)
-		rightLayout.addWidget(self.favEditor, 1)
 		self.entityEditor.hide()
 		self.levelEditor.hide()
-		self.favEditor.hide()
 		
 		
 		
@@ -173,8 +171,6 @@ class MainEditorWidget(QtWidgets.QWidget):
 	
 	def focusForSearch(self):
 		# print("focusForSearch", self.currentView)
-		if(self.currentView == 'favorite'):
-			self.favEditor.focusForSearch()
 		# elif(self.core.mode == 'backupViewer'):
 		# 	self.core.backupViewer.editor.focusForSearch()
 		if self.currentView == 'text' or self.currentView == 'text|text':
@@ -349,17 +345,8 @@ class MainEditorWidget(QtWidgets.QWidget):
 			self.levelEditor.loadFile(fd)
 		elif self.currentView == 'JSON':
 			self.JSON_editor.loadFile(fd)
-			
-			
-		if self.currentView == "favorite":
-			self.setView("text")
-			self.headerWidget.textAction.setChecked(True)
-		
-			act = self.headerWidget.mainActionGroup.checkedAction()
-			if(act != None):
-				act.setChecked(False)
-			
-		
+
+
 
 
 	def openFile(self, path=None, defaultCategory="file"):
@@ -396,22 +383,17 @@ class MainEditorWidget(QtWidgets.QWidget):
 
 			 
 	def save(self):
-		if self.currentView == 'favorite':
-			self.favEditor.updateFD()
-			current = self.favEditor.current()
-			current.save()
+		self.updateFD()
+		current = self.editor.current()
+		if current is None:
+			return
+		if current.path is None and not hasattr(current, 'noteId'):
+			self.saveAs()
 		else:
-			self.updateFD()
-			current = self.editor.current()
-			if current is None:
-				return
-			if current.path is None and not hasattr(current, 'noteId'):
-				self.saveAs()
-			else:
-				current.lines = self.editor.getLines()
-				current.save()
+			current.lines = self.editor.getLines()
+			current.save()
 
-				self.editor.updateSaveIcon()
+			self.editor.updateSaveIcon()
 			
 	def saveAs(self):
 		current = self.editor.current()
@@ -448,15 +430,11 @@ class MainEditorWidget(QtWidgets.QWidget):
 	def setupFavorites(self):
 		
 		self.favorites = {}
-		self.favEditor = EverydayEditor(self, {'disable_contentIndexPanel':True})
-		
-		
-		
+
 		data_path = settings.get_option('general/data_path', '')
 		logPath = os.path.join(os.path.dirname(data_path), 'Logs', 'OpenBorLog.txt')
 		todoPath = os.path.join(data_path, 'TODO.txt')
-		#self.favEditor.setCurrent(fd)
-		
+
 		
 		
 		favorites = {'Log': logPath, 'Todo':todoPath}
@@ -477,8 +455,15 @@ class MainEditorWidget(QtWidgets.QWidget):
 			fd = File(path)
 			fd.loadFromDisk(True)
 			self.favorites[key] = fd
-	
-	
+
+	# Favorites are opened in the regular text editor (like notes), so they share the recent bar
+	def openFavorite(self, key):
+		if self.currentView not in ('text', 'text|text'):
+			self.setView('text')
+			self.headerWidget.textAction.setChecked(True)
+		self.loadFile(self.favorites[key], False)
+
+
 	'''
 		Change the current view
 	
@@ -487,7 +472,7 @@ class MainEditorWidget(QtWidgets.QWidget):
 		self.updateFD()
 		self.headerWidget.setInfo( self.editor.current())
 		
-		widgets = [self.editor, self.entityEditor, self.levelEditor, self.favEditor, self.JSON_editor]
+		widgets = [self.editor, self.entityEditor, self.levelEditor, self.JSON_editor]
 	
 		if view == 'text':
 			self.editor.setDoubleView(False)
@@ -520,9 +505,9 @@ class MainEditorWidget(QtWidgets.QWidget):
 			lineNumber, c = self.editor.editor.cursorPosition
 			while lineNumber > 0:
 				pLine = ParsedLine( lines[lineNumber])
-				part = pLine.next()
+				part = pLine.nextKeyword()
 				if part == 'anim':
-					part = pLine.next()
+					part = pLine.next() # the anim name : a value, keep its original case
 					self.entityEditor.loadAnim(part)
 					break
 				lineNumber -= 1
@@ -541,12 +526,6 @@ class MainEditorWidget(QtWidgets.QWidget):
 				self.levelEditor.HUD_settings = self.editor.current().HUD_settings
 			self.switchProjectCore(None, self.editor.current())
 			self.levelEditor.loadLines(self.editor.getLines())
-		elif view == 'favorite':
-			for w in widgets : w.hide()
-			self.favEditor.show()
-			self.favEditor.setCurrent(self.favorites[self.sender().data()])
-			#self.favEditor.editor.setFocus()
-			
 		elif view == 'JSON':
 			for w in widgets : w.hide()
 			self.JSON_editor.show()
@@ -729,12 +708,10 @@ class HeaderWidget(QtWidgets.QWidget):
 		
 		layout.addStretch(1)
 		self.quickAccessBar = QtWidgets.QToolBar()
-		
+		self.favoriteActions = []
+
 		for key in sorted(self.parent.favorites):
-			b = self.quickAccessBar.addAction(key, lambda:self.parent.setView('favorite'))
-			b.setData(key)
-			b.setCheckable(True)
-			actionGroup.addAction(b)
+			b = self.addFavoriteAction(key)
 			b = self.quickAccessBar.widgetForAction(b)
 			b.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
 			b.customContextMenuRequested.connect(self.showFavoriteContextMenu)
@@ -763,15 +740,23 @@ class HeaderWidget(QtWidgets.QWidget):
 	def addFavorite(self):
 		key = self.parent.addFavorite()
 		if (key == ''): return
-		b = self.quickAccessBar.addAction(key, lambda:self.parent.setView('favorite'))
+		self.addFavoriteAction(key)
+
+	# Not part of mainActionGroup : favorites are files, not views. Checked state follows the current file (see setInfo)
+	def addFavoriteAction(self, key):
+		b = self.quickAccessBar.addAction(key)
+		b.triggered.connect(lambda checked=False, k=key: self.parent.openFavorite(k))
 		b.setData(key)
 		b.setCheckable(True)
-		self.mainActionGroup.addAction(b)
-		
+		self.favoriteActions.append(b)
+		return b
+
 		
 	def toggleButtons(self):
 		project = self.parent.currentProject
-		if(  ('is_OpenBOR' not in project) or project['is_OpenBOR']):
+		isOpenBOR = ('is_OpenBOR' not in project) or project['is_OpenBOR']
+		self.parent.editor.genPathsAction.setVisible(isOpenBOR)
+		if(isOpenBOR):
 			for key in ['Animation', 'Level', 'Scripts']:
 				b = self.buttons[key]
 				b.setVisible(True)
@@ -806,6 +791,8 @@ class HeaderWidget(QtWidgets.QWidget):
 		txt = fd.getLongText()
 		if len(txt) > 20 : txt = '...' + txt[-20:]
 		self.setText(txt)
+		for action in self.favoriteActions:
+			action.setChecked(self.parent.favorites.get(action.data()) is fd)
 		if fd.iconPath is not None:
 			print(fd.iconPath)
 			self.pic.load(fd.iconPath)
