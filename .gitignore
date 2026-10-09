@@ -5,6 +5,9 @@ journal2.log
 journal.log.1
 TODO.txt
 
+# VS Code files
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
